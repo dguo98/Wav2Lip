@@ -89,7 +89,7 @@ class Dataset(object):
         start_frame_num = self.get_frame_id(start_frame) + 1 # 0-indexing ---> 1-indexing
         if start_frame_num - 2 < 0: return None
         for i in range(start_frame_num, start_frame_num + syncnet_T):
-            m = self.crop_audio_window(spec, i - 2)
+            m = self.crop_audio_window(spec, i - 2)  # Q(demi): why i-2?
             if m.shape[0] != syncnet_mel_step_size:
                 return None
             mels.append(m.T)
@@ -109,9 +109,14 @@ class Dataset(object):
         return len(self.all_videos)
 
     def __getitem__(self, idx):
+        #print("in loading data idx=", idx)
         while 1:
             idx = random.randint(0, len(self.all_videos) - 1)
             vidname = self.all_videos[idx]
+
+            # HACK(demi): haven't copied data folder yet
+            #vidname = "/nlp/scr/demiguo/wav2lip/data/lrs2_preprocessed/" + str(random.choice([6060106942941205381])) + "/00001"
+            
             img_names = list(glob(join(vidname, '*.jpg')))
             if len(img_names) <= 3 * syncnet_T:
                 continue
@@ -121,19 +126,19 @@ class Dataset(object):
             while wrong_img_name == img_name:
                 wrong_img_name = random.choice(img_names)
 
-            window_fnames = self.get_window(img_name)
+            window_fnames = self.get_window(img_name)  # get filenames within the window for lipsync expert
             wrong_window_fnames = self.get_window(wrong_img_name)
             if window_fnames is None or wrong_window_fnames is None:
                 continue
-
-            window = self.read_window(window_fnames)
+            
+            window = self.read_window(window_fnames)  # read images from filenames
             if window is None:
                 continue
 
             wrong_window = self.read_window(wrong_window_fnames)
             if wrong_window is None:
                 continue
-
+            
             try:
                 wavpath = join(vidname, "audio.wav")
                 wav = audio.load_wav(wavpath, hparams.sample_rate)
@@ -143,6 +148,7 @@ class Dataset(object):
                 continue
 
             mel = self.crop_audio_window(orig_mel.copy(), img_name)
+            #print("got mel")
             
             if (mel.shape[0] != syncnet_mel_step_size):
                 continue
@@ -161,6 +167,7 @@ class Dataset(object):
             mel = torch.FloatTensor(mel.T).unsqueeze(0)
             indiv_mels = torch.FloatTensor(indiv_mels).unsqueeze(1)
             y = torch.FloatTensor(y)
+            #print("preprocess")
             return x, indiv_mels, mel, y
 
 def save_sample_images(x, g, gt, global_step, checkpoint_dir):
@@ -208,6 +215,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
         running_sync_loss, running_l1_loss = 0., 0.
         prog_bar = tqdm(enumerate(train_data_loader))
         for step, (x, indiv_mels, mel, gt) in prog_bar:
+            #print("load first batch")
             model.train()
             optimizer.zero_grad()
 
