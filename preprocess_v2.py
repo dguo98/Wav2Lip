@@ -37,6 +37,7 @@ template = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'
 # template2 = 'ffmpeg -hide_banner -loglevel panic -threads 1 -y -i {} -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 {}'
 
 def process_video_file(vfile, args, gpu_id):
+    print("in process video file")
     video_stream = cv2.VideoCapture(vfile)
     
     vidname = os.path.basename(vfile).split('.')[0]
@@ -45,25 +46,31 @@ def process_video_file(vfile, args, gpu_id):
 
     frames = []
     i = -1
+    os.makedirs(f"{fulldir}/frames", exist_ok=True)
+    os.makedirs(f"{fulldir}/wav2lip_faces", exist_ok=True)
+    print("process video file=", vfile)
     while 1:
         still_reading, frame = video_stream.read()
         if not still_reading:
             video_stream.release()
             break
-
+        
+        """
         # HACK(demi): first crop
         cx=310
         cy=750
         s=450
         frame = frame[cx:cx+s, cy:cy+s]
+        """
 
         i += 1
         print("i=", i)
-        cv2.imwrite(f"{fulldir}/frame_{i:04d}.jpg", frame)
+        cv2.imwrite(f"{fulldir}/frames/frame_{i:06d}.jpg", frame)
+        #print("frame shape=", frame.shape)
 
         # HACK(demi): resize first
-        width = int(frame.shape[1] * 0.5)
-        height = int(frame.shape[0] * 0.5)
+        width = int(frame.shape[1] * 0.25)
+        height = int(frame.shape[0] * 0.25)
         dim = (width, height)
         frame = cv2.resize(frame, dim, interpolation=cv2.INTER_AREA)
         frames.append(frame)
@@ -89,14 +96,14 @@ def process_video_file(vfile, args, gpu_id):
                 embed()
 
             x1, y1, x2, y2 = f
-            cv2.imwrite(path.join(fulldir, f'{i:04d}.jpg'), fb[j][y1:y2, x1:x2])
+            cv2.imwrite(path.join(f"{fulldir}/wav2lip_faces", f'{i:06d}.jpg'), fb[j][y1:y2, x1:x2])
 
 def process_audio_file(vfile, args):
     vidname = os.path.basename(vfile).split('.')[0]
     fulldir = path.join(args.preprocessed_root, vidname)
     os.makedirs(fulldir, exist_ok=True)
 
-    wavpath = path.join(fulldir, 'audio.wav')
+    wavpath = path.join(fulldir, 'audio-raw.wav')
 
     command = template.format(vfile, wavpath)
     subprocess.call(command, shell=True)
@@ -114,7 +121,11 @@ def mp_handler(job):
 def main(args):
     print('Started processing for {} with {} GPUs'.format(args.data_root, args.ngpu))
 
-    filelist = glob(path.join(args.data_root, '*.mp4'))
+
+    if os.path.exists(f"{args.data_root}.mp4"):
+        filelist = [args.data_root + ".mp4"]
+    else:
+        filelist = glob(path.join(args.data_root, '*.mp4'))
 
     jobs = [(vfile, args, i%args.ngpu) for i, vfile in enumerate(filelist)]
     p = ThreadPoolExecutor(args.ngpu)

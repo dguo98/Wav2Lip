@@ -38,7 +38,7 @@ class Dataset(object):
     def __init__(self, split):
         self.all_videos = [split]
         self.wavpath = f"{split}/audio.wav"
-        self.frames = sorted(glob(f"{split}/[0123456789]*.jpg"))
+        self.frames = sorted(glob(f"{split}/wav2lip_faces/[0123456789]*.jpg"))
 
         # HACK(demi): for debugging
         #self.frames = self.frames[:42]
@@ -63,7 +63,7 @@ class Dataset(object):
 
         window_fnames = []
         for frame_id in range(start_id, start_id + syncnet_T):
-            frame = join(vidname, f'{frame_id:04d}.jpg')
+            frame = join(vidname, f'{frame_id:06d}.jpg')
             if not isfile(frame):
                 return None
             window_fnames.append(frame)
@@ -272,8 +272,8 @@ def train(video_folder, device, model, train_data_loader, test_data_loader, opti
 
             for i in range(len(final_ids)):
                 idx = final_ids[i].item()
-                torch.save(audio[i].reshape(-1), f"{video_folder}/wav2lip_audio_{idx:04d}.pt")
-                torch.save(context[i].reshape(-1), f"{video_folder}/wav2lip_context_{idx:04d}.pt")
+                torch.save(audio[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_audio_{idx:06d}.pt")
+                torch.save(context[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_context_{idx:06d}.pt")
 
             # embed()
 
@@ -311,9 +311,11 @@ def load_checkpoint(path, model, optimizer, reset_optimizer=False, overwrite_glo
     return model
 
 if __name__ == "__main__":
-    video_folders = glob(f"{args.data_root}/*")
+    if os.path.exists(f"{args.data_root}.mp4"):  # single video
+        video_folders = [args.data_root]
+    else:
+        video_folders = glob(f"{args.data_root}/*")
     print("video_folders=",video_folders)
-
     # Model
     model = Wav2Lip().to(device)
     print('total trainable params {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
@@ -327,6 +329,7 @@ if __name__ == "__main__":
     for video_folder in video_folders:
         if ".mp4" in video_folder:
             continue
+        os.makedirs(f"{video_folder}/wav2lip_latents")
         train_dataset = Dataset(video_folder)
         """ 
         for i in tqdm(range(400), desc="go through dataset"):
