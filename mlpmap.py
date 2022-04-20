@@ -1,11 +1,13 @@
 import os
 import sys
 import argparse
+import pickle
 import matplotlib.pyplot as plt
 from glob import glob
 from tqdm import tqdm
 import numpy as np
 from IPython import embed
+from sklearn.decomposition import PCA
 
 import torch
 import torch.nn as nn
@@ -13,7 +15,8 @@ from torch import optim
 from torch.utils import data as data_utils
 
 class Mapper(torch.nn.Module):
-    def __init__(self, args, input_dim=512, output_dim=512*18):
+    def __init__(self, args, input_dim=512, output_dim=512*18,
+                neutral_vec=None, device="cuda"):
         super(Mapper, self).__init__()
         
         self.args = args
@@ -21,6 +24,11 @@ class Mapper(torch.nn.Module):
         self.output_dim = output_dim
         self.hidden_dim = args.hidden_dim
         self.nlayer = args.nlayer
+        self.device = device
+        self.mode = args.mode
+
+        if self.args.pca is not None:
+            self.output_dim = len(self.args.pca_dims)
         
         assert self.nlayer >= 1
         
@@ -34,100 +42,72 @@ class Mapper(torch.nn.Module):
                 self.layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
             self.layers.append(nn.ReLU())
             self.layers.append(nn.Linear(self.hidden_dim, self.output_dim))
-
    
     def forward(self, audio_vec):
         x = audio_vec
         for layer in self.layers:
             x = layer(x)
         return x
-        
+
 
 class Audio2FrameDataset(object):
-    def __init__(self, args, path, split, load_img=False, cache=True, crop=-1):
+    def __init__(self, args, path, split, load_img=False):
         self.args = args
         self.split = split
         self.path = path
-        self.audio_files = sorted(glob(f"{path}/wav2lip_latents/wav2lip_audio*"))
-        self.latent_files = sorted(glob(f"{path}/frame_latents/latents_frame_[0123456789]*"))
+        self.audio_vecs = np.load(f"{path}/wav2ip.npy")
+        self.data_len = len(self.audio_vecs)
+        
+        if split == "test":
+            self.latent_vecs = np.zeros((self.data_len, 18*512))
+        else:
+            self.latent_vecs = np.load(f"{path}/frame.npy").reshape(-1, 18*512)
+        assert len(self.audio_vecs) == len(self.latent_vecs)
+
         self.mode = args.mode
-
-        assert len(self.audio_files) == len(self.latent_files) or split == "test"
-        if split in ["train", "val"] and crop is not -1:
-            self.audio_files = self.audio_files[20:20+crop]
-            self.latent_files = self.latent_files[20:20+crop]
-
         assert load_img is False, "loading image not supported yet"
+
         split_ratio = 0.9
-        split_num = int(split_ratio * len(self.audio_files))
+        split_num = int(split_ratio * len(self.audio_vecs))
         if split == "train":
-            self.audio_files = self.audio_files[:split_num]
-            self.latent_files = self.latent_files[:split_num]
+            self.audio_vecs = self.audio_vecs[:split_num]
+            self.latent_vecs = self.latent_vecs[:split_num]
         elif split == "val":
-            self.audio_files = self.audio_files[split_num:]
-            self.latent_files = self.latent_files[split_num:]
+            self.audio_vecs = self.audio_vecs[split_num:]
+            self.latent_vecs = self.latent_vecs[split_num:]
         else:
             assert split == "test"
             pass
 
-        self.data_len = len(self.audio_files)
-
-        self.cache = cache
-
-        start_id = 0
-        if split == "val":
-            start_id = split_num
-
-        if crop != -1:
-            assert split is not "test"
-            start_id += 20  # hack, the front data is not clean
-
-        if self.cache:
-            self.audio_vecs = []
-            for i, f in tqdm(enumerate(self.audio_files), desc="load audio vecs"):
-                v = torch.load(f).reshape(-1).detach().cpu().numpy()
-                self.audio_vecs.append(v)
-
-                assert f"{i+start_id:06d}" in f
-            self.audio_vecs = np.stack(self.audio_vecs, axis=0)
-            assert self.audio_vecs.shape == (self.data_len, 512)
-
-            if self.split is not "test":
-                self.latent_vecs = []
-                for i, f in tqdm(enumerate(self.latent_files), desc="load latent vecs"):
-                    v = np.load(f).reshape(-1)
-                    self.latent_vecs.append(v)
-
-                    assert f"{i+start_id:06d}" in f
-                self.latent_vecs = np.stack(self.latent_vecs, axis=0)
-                assert self.latent_vecs.shape == (self.data_len, 512*18)
-            else:
-                self.latent_vecs = np.zeros((self.data_len, 512*18))
-        
-        # self.neutral_vec = np.load(f"{self.path}/frame_latents/neutral.npy")
-        self.neutral_vec = np.mean(self.latent_vecs, axis=0)
-
-        if self.mode == "diff":
-            if split in ["train", "val"]:
-                self.latent_vecs = self.latent_vecs[1:] - self.latent_vecs[:-1]
-                self.audio_vecs = self.audio_vecs[:-1]
-                self.data_len -= 1
-        else:
-            assert self.mode == "default"
-            self.latent_vecs = self.latent_vecs - self.neutral_vec.reshape(1, self.latent_vecs.shape[1])
-            
-
-        assert self.cache is True
+        assert self.mode == "default"
     
     def get_neutral(self):
-        return self.neutral_vec
+        return self.args.neutral_vec
 
     def __len__(self):
         return self.data_len
 
     def __getitem__(self, idx):
-        return np.array([idx]), self.audio_vecs[idx], self.latent_vecs[idx]
+        latent_vec = self.latent_vecs[idx:idx+1] - self.args.neutral_vec
+        if self.args.pca is not None:
+            latent_vec = self.args.pca.transform(latent_vec)[:, self.args.pca_dims]
+        return np.array([idx]), self.audio_vecs[idx], latent_vec.reshape(-1)
+            
 
+def decode(args, vecs):
+    """ from model vecs to original latent vecs """
+    assert len(vecs.shape) == 2
+    assert args.neutral_vec.shape[0] == 1
+    if args.pca is not None:
+        new_vecs = np.repeat(args.pca_neutral_vec, len(vecs), axis=0)
+        new_vecs[:, args.pca_dims] = vecs
+        new_vecs = args.pca.inverse_transform(new_vecs)
+        new_vecs = new_vecs + args.neutral_vec
+        return new_vecs
+    else: 
+        vecs = vecs + args.neutral_vec
+        return vecs
+        
 
 def train(args, data_loader, model, optimizer, neutral_vec):
     model.train()
@@ -145,12 +125,12 @@ def train(args, data_loader, model, optimizer, neutral_vec):
         latent_vec = latent_vec.cuda()
 
         predict_vec = model(audio_vec)
-        assert predict_vec.size() == (bsz, 512*18)
+        assert predict_vec.size() == (bsz, model.output_dim)
 
 
         # MSE Loss for now
         loss = torch.nn.MSELoss(reduction="mean")(predict_vec, latent_vec) 
-        loss = loss * 512 * 18  # only average across batch, not items
+        loss = loss * model.output_dim  # only average across batch, not items
         losses.append(loss.item())
 
         loss.backward()
@@ -172,12 +152,12 @@ def validate(args, data_loader, model, neutral_vec):
         latent_vec = latent_vec.cuda()
 
         predict_vec = model(audio_vec)
-        assert predict_vec.size() == (bsz, 512*18)
+        assert predict_vec.size() == (bsz, model.output_dim)
 
 
         # MSE Loss for now
         loss = torch.nn.MSELoss(reduction="mean")(predict_vec, latent_vec) 
-        loss = loss * 512 * 18  # only average across batch, not items
+        loss = loss * model.output_dim  # only average across batch, not items
         losses.append(loss.item())
 
     return np.mean(losses)
@@ -201,18 +181,18 @@ def inference(args, data_loader, model, infer_dir, neutral_vec):
         ids = ids.cuda().reshape(bsz)
 
         predict_vec = model(audio_vec)
-        assert predict_vec.size() == (bsz, 512*18)
+        assert predict_vec.size() == (bsz, model.output_dim)
+        
+        predict_vec = decode(predict_vec.detach().cpu().numpy())
+        predict_vec = torch.from_numpy(predict_vec)  # todo(demi): save in torch files are bad
 
         for i in range(bsz):
             idx = ids[i].item()
 
             assert idx == counter
             counter += 1
-
-            if args.mode == "diff":
-                cur_vec = cur_vec + predict_vec[i].reshape(-1)
-            else:
-                cur_vec = neutral_vec.reshape(-1) + predict_vec[i].reshape(-1)
+            
+            cur_vec = predict_vec[i].reshape(-1)
             torch.save(cur_vec, f"{infer_dir}/predict_{idx:06d}.pt")
 
     return 
@@ -223,12 +203,14 @@ if __name__ == "__main__":
     parser.add_argument("--test_path", type=str, default="eval_mlpmap/eval-1")
     parser.add_argument("--output", type=str, default="output/debug")
 
+
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--crop", type=int, default=-1, help="for debugging: crop train dataset")
     
-    parser.add_argument("--mode", type=str, default="default", help="support: [default, diff]")
+    parser.add_argument("--mode", type=str, default="default", help="support: [default]")
     parser.add_argument("--nlayer", type=int, default=2)
     parser.add_argument("--hidden_dim", type=int, default=1024)
+    parser.add_argument("--pca", type=str, default=None)
+    parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-2)
@@ -237,12 +219,20 @@ if __name__ == "__main__":
     parser.add_argument("--lr_patience", type=int, default=5)
 
     args = parser.parse_args()
+
     
+    # load pca
+    args.neutral_vec = np.load(f"{args.train_path}/frame_latents/neutral.npy").reshape(1, 18*512)
     device = torch.device("cuda")
-    model = Mapper(args).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=args.lr_reduce, patience=args.lr_patience)
-    
+    args.device = device
+    if args.pca is not None:
+        args.pca = pickle.load(args.pca)
+        args.pca_neutral_vec = args.pca.transform(args.neutral_vec)
+        
+        if args.pca_dims is None:
+            args.pca_dims = list(range(args.pca.n_components_))
+
+
     # datasets
     train_dataset = Audio2FrameDataset(args, args.train_path, "train", crop=args.crop)
     val_dataset = Audio2FrameDataset(args, args.train_path, "val", crop=args.crop)
@@ -263,7 +253,12 @@ if __name__ == "__main__":
     if not os.path.exists(f"{args.output}/inference"):
         os.makedirs(f"{args.output}/inference")
     
-    neutral_vec = torch.from_numpy(train_dataset.get_neutral()).to(device)
+    
+    # models and optimizers
+    model = Mapper(args).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=args.lr_reduce, patience=args.lr_patience)
+   
     # training and inference
 
     train_losses = []
