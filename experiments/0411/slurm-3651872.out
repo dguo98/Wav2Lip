@@ -1,0 +1,4 @@
+log dir logs/B00000
+/sailhome/demiguo/demiguo/research/Wav2Lip
+slurmstepd: error: execve(): python wav2lip_train.py --data_root ./data/lrs2_preprocessed/ --checkpoint_dir ./logs/${EXP_ID}/checkpoints --syncnet_checkpoint_path ./checkpoints/lipsync_expert.pth 1>${LOG_DIR}/log.out 2>${LOG_DIR}/log.err: No such file or directory
+srun: error: tibet14: task 0: Exited with exit code 2

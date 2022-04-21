@@ -15,8 +15,7 @@ from torch import optim
 from torch.utils import data as data_utils
 
 class Mapper(torch.nn.Module):
-    def __init__(self, args, input_dim=512, output_dim=512*18,
-                neutral_vec=None, device="cuda"):
+    def __init__(self, args, input_dim=512, output_dim=512*18):
         super(Mapper, self).__init__()
         
         self.args = args
@@ -55,11 +54,11 @@ class Audio2FrameDataset(object):
         self.args = args
         self.split = split
         self.path = path
-        self.audio_vecs = np.load(f"{path}/wav2ip.npy")
-        self.data_len = len(self.audio_vecs)
+
+        self.audio_vecs = np.load(f"{path}/wav2lip.npy")
         
         if split == "test":
-            self.latent_vecs = np.zeros((self.data_len, 18*512))
+            self.latent_vecs = np.zeros((len(self.audio_vecs), 18*512))
         else:
             self.latent_vecs = np.load(f"{path}/frame.npy").reshape(-1, 18*512)
         assert len(self.audio_vecs) == len(self.latent_vecs)
@@ -78,6 +77,7 @@ class Audio2FrameDataset(object):
         else:
             assert split == "test"
             pass
+        self.data_len = len(self.audio_vecs)
 
         assert self.mode == "default"
     
@@ -183,7 +183,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec):
         predict_vec = model(audio_vec)
         assert predict_vec.size() == (bsz, model.output_dim)
         
-        predict_vec = decode(predict_vec.detach().cpu().numpy())
+        predict_vec = decode(args, predict_vec.detach().cpu().numpy())
         predict_vec = torch.from_numpy(predict_vec)  # todo(demi): save in torch files are bad
 
         for i in range(bsz):
@@ -226,7 +226,8 @@ if __name__ == "__main__":
     device = torch.device("cuda")
     args.device = device
     if args.pca is not None:
-        args.pca = pickle.load(args.pca)
+        with open(args.pca, "rb") as f:
+            args.pca = pickle.load(f)
         args.pca_neutral_vec = args.pca.transform(args.neutral_vec)
         
         if args.pca_dims is None:
@@ -234,8 +235,9 @@ if __name__ == "__main__":
 
 
     # datasets
-    train_dataset = Audio2FrameDataset(args, args.train_path, "train", crop=args.crop)
-    val_dataset = Audio2FrameDataset(args, args.train_path, "val", crop=args.crop)
+    print("loading datasets")
+    train_dataset = Audio2FrameDataset(args, args.train_path, "train") 
+    val_dataset = Audio2FrameDataset(args, args.train_path, "val")
     test_dataset = Audio2FrameDataset(args, args.test_path, "test")
 
     train_data_loader = data_utils.DataLoader(
@@ -253,14 +255,16 @@ if __name__ == "__main__":
     if not os.path.exists(f"{args.output}/inference"):
         os.makedirs(f"{args.output}/inference")
     
-    
+     
     # models and optimizers
+    print("loading models and optimizers")
     model = Mapper(args).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=args.lr_reduce, patience=args.lr_patience)
    
     # training and inference
-
+    print("start training")
+    neutral_vec = torch.from_numpy(args.neutral_vec).to(device)
     train_losses = []
     val_losses = []
     for epoch in range(args.epochs):
@@ -280,7 +284,7 @@ if __name__ == "__main__":
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    neutral_vec = torch.from_numpy(train_dataset.get_neutral()).to(device)  # now, train and test has to be the same face
+    neutral_vec = torch.from_numpy(args.neutral_vec).to(device)  # now, train and test has to be the same face
     inference(args, test_data_loader, model, infer_dir, neutral_vec)
 
     x = list(range(args.epochs))

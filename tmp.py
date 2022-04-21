@@ -10,13 +10,13 @@ from IPython import embed
 
 prefix = "p_train"
 n_frames=350
-data_dir ="data/p_words/{prefix}"
+data_dir =f"data/p_words/{prefix}"
 #data_dir = "./tmp"
 X = np.load(f'{data_dir}/wav2lip.npy')
 y = np.load(f'{data_dir}/frame.npy')
 y = y.reshape((y.shape[0], -1))
-#neutral = np.load(f'{data_dir}/frame_latents/neutral.npy').reshape(-1)
-neutral = y[0].reshape(-1)
+neutral = np.load(f'{data_dir}/frame_latents/neutral.npy').reshape(-1)
+#neutral = y[0].reshape(-1)
 #neutral=np.mean(y,axis=0)
 
 # analyze PCA reduction
@@ -54,8 +54,10 @@ for i,vec in enumerate(vecs):
 for i,vec in enumerate(inv_vecs):
     torch.save(torch.tensor(vec+neutral), f"./tmp/{prefix}_pca_inverse_n{n}/{i:06d}.pt")
  
+ 
 # analyze each dimension    
 new_neutral = pca.transform(neutral.reshape((1,-1))*0)
+"""
 for i in tqdm(range(n), "varying dims"):  # fix {i}-th dim
     ith_new_vecs = np.repeat(new_neutral, len(new_vecs), axis=0)
     assert ith_new_vecs.shape == new_vecs.shape
@@ -70,9 +72,9 @@ for i in tqdm(range(n), "varying dims"):  # fix {i}-th dim
 name = "pose"
 ith_new_vecs = np.repeat(new_neutral, len(new_vecs), axis=0)
 assert ith_new_vecs.shape == new_vecs.shape
-ith_new_vecs[:, 0] = new_vecs[:, 0]
-ith_new_vecs[:, 3] = new_vecs[:, 3]
-ith_new_vecs[:, 2] = new_vecs[:, 2]
+for i in [0,3]:
+     ith_new_vecs[:, i] = new_vecs[:, i]
+   
 inv_vecs = pca.inverse_transform(ith_new_vecs)
 os.makedirs(f"./tmp/{prefix}_pca_inverse_n{n}/{name}", exist_ok=True)
 os.system(f"cp {data_dir}/audio.wav ./tmp/{prefix}_pca_inverse_n{n}/{name}")
@@ -82,14 +84,14 @@ for j,vec in enumerate(inv_vecs):
 name = "talking"
 ith_new_vecs = np.repeat(new_neutral, len(new_vecs), axis=0)
 assert ith_new_vecs.shape == new_vecs.shape
-for i in [1,2,3,4,5,6,7,8,9]:
+for i in [1,2,4,5,8]:
     ith_new_vecs[:, i] = new_vecs[:, i]
 inv_vecs = pca.inverse_transform(ith_new_vecs)
 os.makedirs(f"./tmp/{prefix}_pca_inverse_n{n}/{name}", exist_ok=True)
 os.system(f"cp {data_dir}/audio.wav ./tmp/{prefix}_pca_inverse_n{n}/{name}")
 for j,vec in enumerate(inv_vecs):
     torch.save(torch.tensor(vec+neutral), f"./tmp/{prefix}_pca_inverse_n{n}/{name}/{j:06d}.pt")
-"""
+
 """
 
   
