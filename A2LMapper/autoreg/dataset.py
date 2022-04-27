@@ -52,6 +52,17 @@ class Audio2FrameDataset(object):
                 return self.data_len // self.seq_len + 1
 
     def __getitem__(self, idx):
+        """
+        if self.seq_len == 1:  # hack: debug
+            idxs = np.arange(idx,idx+1)
+            src = self.audio_vecs[idx:idx+1]
+            tgt = self.latent_vecs[idx:idx+1]
+            prev_tgt = tgt
+            src_mask = np.ones((1,1))
+            tgt_mask = np.ones((1,1))
+            return idxs,src,prev_tgt,tgt,src_mask,tgt_mask
+        """
+            
         if self.split != "train":
             idx = idx * self.seq_len
 

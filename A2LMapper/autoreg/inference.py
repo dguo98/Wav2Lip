@@ -17,7 +17,7 @@ from torch.utils import data as data_utils
 
 sys.path.append(".")
 from dataset import Audio2FrameDataset
-from model import Transformer, LinearMapper, AutoRegMLPMapper
+from model import Transformer, LinearMapper
 from optim import NoamOpt
 
 def train(args, data_loader, model, opt):
@@ -59,8 +59,8 @@ def train(args, data_loader, model, opt):
 
         # MSE Loss for now
         losses.append(loss.item())
-       
-        if n_iter % 100 == 0 and n_iter > 0 and args.mode == "debug":
+        
+        if n_iter % 100 == 0 and n_iter > 0:
            print("loss avg=", np.mean(losses[-100:]))
 
         loss.backward()
@@ -88,7 +88,7 @@ def validate(args, data_loader, model):
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         if args.mode == "debug":
-            predict_tgt = predict_tgt * 0
+            predict_tgt = prev_tgt
         assert predict_tgt.shape == tgt.shape
         assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
 
@@ -102,9 +102,48 @@ def validate(args, data_loader, model):
         losses.append(loss.item())
 
     return np.mean(losses)
- 
-def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
-    assert mode in ["autoreg", "tf"]
+
+"""
+def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
+    model.eval()
+
+    total = len(data_loader)
+    neutral_vec = neutral_vec.reshape(1, -1).type(torch.float32)
+
+    losses = []
+    
+    output_dim = model.output_dim
+    cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
+    counter = 0
+    # todo(demi): support rolling/overlapping source context
+
+    def subsequent_mask(size):
+        mask = 1-np.triu(np.ones((1,size,size)),k=1)
+        return torch.from_numpy(mask).cuda()
+
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+        
+        bsz = src.size(0)
+        seq_len = src.size(1)
+        assert bsz == 1
+
+        src = src.cuda()
+        prev_tgt = prev_tgt.cuda()  # not actually used
+        tgt = tgt.cuda()  # not actually used
+        src_mask = src_mask.cuda()
+        tgt_mask = tgt_mask.cuda()  # not actually used
+        
+        predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
+        assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
+
+        for i in range(seq_len):
+            torch.save(predict_tgt[0][i].reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
+            counter += 1
+
+    return 
+"""
+
+def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
     model.eval()
 
     total = len(data_loader)
@@ -140,19 +179,66 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
             out = model.decode(memory, src_mask, prev_tgt, tgt_mask, gen=False)
             assert out.shape[:2] == (bsz, prev_tgt.size(1))
             predict_tgt = model.generate(out[:, -1])
+            if args.mode == "debug":
+                predict_tgt = predict_tgt*0
             
             torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
             counter += 1
             
-            if mode == "tf":
-                predict_tgt = tgt[0, i]  # teacher forcing
+            predict_tgt = tgt[0, i]  # teacher forcing
             prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
             cur_vec = predict_tgt
             assert prev_tgt.shape == (bsz, i+2, output_dim)
 
     return 
 
+def inference(args, data_loader, model, infer_dir, neutral_vec):
+    model.eval()
 
+    total = len(data_loader)
+    neutral_vec = neutral_vec.reshape(1, -1).type(torch.float32)
+
+    losses = []
+    
+    output_dim = model.output_dim
+    cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
+    counter = 0
+    # todo(demi): support rolling/overlapping source context
+
+    def subsequent_mask(size):
+        mask = 1-np.triu(np.ones((1,size,size)),k=1)
+        return torch.from_numpy(mask).cuda()
+
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+        
+        bsz = src.size(0)
+        seq_len = src.size(1)
+        assert bsz == 1
+
+        src = src.cuda()
+        prev_tgt = prev_tgt.cuda()  # not actually used
+        tgt = tgt.cuda()  # not actually used
+        src_mask = src_mask.cuda()
+        tgt_mask = tgt_mask.cuda()  # not actually used
+        
+        memory = model.encode(src, src_mask)
+        prev_tgt = cur_vec.reshape(1, 1, output_dim)
+        for i in range(seq_len):
+            tgt_mask = subsequent_mask(prev_tgt.size(1))
+            out = model.decode(memory, src_mask, prev_tgt, tgt_mask, gen=False)
+            assert out.shape[:2] == (bsz, prev_tgt.size(1))
+            predict_tgt = model.generate(out[:, -1])
+            if args.mode == "debug":
+                predict_tgt = predict_tgt*0
+            
+            torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
+            counter += 1
+
+            prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
+            cur_vec = predict_tgt
+            assert prev_tgt.shape == (bsz, i+2, output_dim)
+
+    return 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -169,8 +255,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="transformer")
 
     # MLP parameters
-    parser.add_argument("--nlayer", type=int, default=2)
-    parser.add_argument("--hidden_dim", type=int, default=1024)
+    # parser.add_argument("--nlayer", type=int, default=2)
+    # parser.add_argument("--hidden_dim", type=int, default=1024)
     
     # transformer parameters
     parser.add_argument("--h", type=int, default=2)
@@ -181,27 +267,20 @@ if __name__ == "__main__":
 
 
     # optimization
-    parser.add_argument("--optim",  type=str, default="noam")
+    parser.add_argument("--optim",  type=str, default="naom")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--seq_len", type=int, default=320)
-
-    # NoamOpt
     parser.add_argument("--warmup", type=int, default=4000)
-    
-    # Adam
+
     parser.add_argument("--lr", type=float, default=1e-3)  # only for adam
-    parser.add_argument("--lr_reduce", type=float, default=0.5)
-    parser.add_argument("--lr_patience", type=int, default=5)
-    parser.add_argument("--wd", type=float, default=0)
+    #parser.add_argument("--lr_reduce", type=float, default=0.5)
+    #parser.add_argument("--lr_patience", type=int, default=5)
+    #parser.add_argument("--wd", type=float, default=0)
+
 
     args = parser.parse_args()
-    
-    assert args.model in ["transformer", "mlp", "linear"]
-    if args.model == "mlp":
-        if args.seq_len != 1:
-            print("warning: seq_len is forced to set to 1")
-            args.seq_len = 1
+
 
     
     # load pca
@@ -214,6 +293,9 @@ if __name__ == "__main__":
     train_dataset = Audio2FrameDataset(args, args.train_path, "train") 
     val_dataset = Audio2FrameDataset(args, args.train_path, "val")
     test_dataset = Audio2FrameDataset(args, args.test_path, "test")
+
+    # HACK(demi)
+    test_dataset.data_len = min(test_dataset.data_len, 400)
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -238,86 +320,44 @@ if __name__ == "__main__":
         print("loaded transformer on cpu")
         model = model.to(device)
         d_model = model.model.src_embed[0].d_model
-    elif args.model == "linear":
+    else:
+        assert args.model == "linear"
         model = LinearMapper(args).to(device)
         d_model = 512
-    else:
-        model = AutoRegMLPMapper(args).to(device)
-        d_model = args.hidden_dim
 
     print("loading optimizer") 
-    if args.optim == "noam":
+    if args.optim == "naom":
         optimizer = NoamOpt(d_model, 2, args.warmup,
             torch.optim.Adam(model.parameters(), lr=0, betas=(0.9,0.98), eps=1e-9))
     else:
         assert args.optim == "adam"
-        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=args.lr_reduce, patience=args.lr_patience)
-           
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+       
     # training and inference
     print("start training")
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)
     train_losses = []
     val_losses = []
-    
-    best_val = None
-    last_val = None
-    last_train = None
-    for epoch in range(args.epochs):
-        train_loss = train(args, train_data_loader, model, optimizer)
-        print(f"EPOCH[{epoch}] | Train Loss : {train_loss:.3f}")
-        val_loss = validate(args, val_data_loader, model)
-        print(f"EPOCH[{epoch}] | Val Loss : {val_loss:.3f}")
 
-        if args.optim == "adam":
-            scheduler.step(val_loss)
-            print("LR:", optimizer.param_groups[0]['lr'])
-
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-
-
-        if best_val is None or val_loss < best_val:
-            best_val = val_loss
-            torch.save({"model_state_dict": model.state_dict()}, f"{args.output}/best_val_checkpoint.pt")
-        last_val = val_loss 
-        last_train = train_loss
-
-    torch.save({"model_state_dict": model.state_dict()}, f"{args.output}/last_checkpoint.pt")
     model.load_state_dict(torch.load(f"{args.output}/best_val_checkpoint.pt")["model_state_dict"])
-
-
+        
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)  # now, train and test has to be the same face
-       
+    
     val_loss = validate(args, val_data_loader, model)
     test_loss = validate(args, test_data_loader, model)
-    print("load model val loss=", val_loss)
-    print("load model test loss=", test_loss)
-
+    print("val loss=", val_loss)
+    print("test loss=", test_loss)
 
     infer_dir = f"{args.output}/tf_inference"
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
+    tf_inference(args, test_data_loader, model, infer_dir, neutral_vec)
 
     infer_dir = f"{args.output}/inference"
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
+    inference(args, test_data_loader, model, infer_dir, neutral_vec)
 
-
-    x = list(range(args.epochs))
-    plt.plot(x, train_losses, label="train")
-    plt.plot(x, val_losses, label="val")
-    plt.xlabel("epochs")
-    plt.ylabel("loss")
-    plt.legend()
-    plt.savefig(f"{args.output}/loss_curve.png")
-
-    with open(f"{args.output}/hparams.pkl", "wb") as f:
-        pickle.dump(args, f)
-    with open(f"{args.output}/metrics.json", "w") as f:
-        json.dump({"best_val_loss": best_val, "last_val_loss": last_val, "last_train_loss": last_train}, f)
-
+       

@@ -285,40 +285,63 @@ class LinearMapper(torch.nn.Module):
     def generate(self, out):
         return out
 
-
-"""
-class Mapper(torch.nn.Module):
-     def __init__(self, args, input_dim=512, output_dim=512*18):
-        super(LinearMapper, self).__init__()
-      
+class AutoRegMLPMapper(torch.nn.Module):
+    def __init__(self, args, input_dim=512, output_dim=512*18):
+        super(AutoRegMLPMapper, self).__init__()
         self.args = args
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dim = args.hidden_dim
         self.nlayer = args.nlayer
-        self.device = device
-        self.mode = args.mode
 
-        if self.args.pca is not None:
-            self.output_dim = len(self.args.pca_dims)
-        
-        assert self.nlayer >= 1
-        
         self.layers = nn.ModuleList()
         if self.nlayer == 1:
-            self.layers.append(nn.Linear(self.input_dim, self.output_dim))
+            self.layers.append(nn.Linear(self.input_dim+self.output_dim, self.output_dim))
         else:
-            self.layers.append(nn.Linear(self.input_dim, self.hidden_dim))
+            self.layers.append(nn.Linear(self.input_dim+self.output_dim, self.hidden_dim))
             for i in range(self.nlayer-2):
                 self.layers.append(nn.ReLU())
                 self.layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
             self.layers.append(nn.ReLU())
             self.layers.append(nn.Linear(self.hidden_dim, self.output_dim))
-   
-    def forward(self, audio_vec):
-        x = audio_vec
+
+
+    def forward(self, src, tgt, src_mask, tgt_mask):
+        # src: [bsz, 1, input_dim]
+        # tgt=prev_tgt: [bsz, 1, output_dim]
+        bsz, seq_len = src.shape[:2]
+        assert seq_len == 1
+        assert torch.sum(1-src_mask).item() == 0 and torch.sum(1-tgt_mask).item() == 0
+
+        inp = torch.cat([src, tgt], dim=2)
+        inp = inp.reshape(bsz, self.input_dim+self.output_dim)
+        
+        x = inp
         for layer in self.layers:
             x = layer(x)
-        return x
 
-"""
+        return x.reshape(bsz, 1, self.output_dim)
+        
+
+    def encode(self, src, src_mask):
+        return src
+
+    def decode(self, memory, src_mask, tgt, tgt_mask, gen=True):
+        src = memory
+        bsz, seq_len = src.shape[:2]
+        assert seq_len == 1
+        assert torch.sum(1-src_mask).item() == 0 and torch.sum(1-tgt_mask).item() == 0
+
+        inp = torch.cat([src, tgt], dim=2)
+        inp = inp.reshape(bsz, self.input_dim+self.output_dim)
+        
+        x = inp
+        for layer in self.layers:
+            x = layer(x)
+
+        return x.reshape(bsz, 1, self.output_dim)
+    
+    def generate(self, out):
+        return out
+
+
