@@ -4,14 +4,15 @@ import sys
 import numpy as np
 
 class Audio2FrameDataset(object):
-    def __init__(self, args, path, split, load_img=False):
+    def __init__(self, args, path, split, load_img=False, split_ratio=0.9, input_dim=512, output_dim=512*18):
         self.args = args
         self.split = split
         self.path = path
         self.seq_len = args.seq_len
+        self.split_ratio = split_ratio
 
-        self.input_dim=512
-        self.output_dim=512*18
+        self.input_dim=input_dim
+        self.output_dim=output_dim
 
         self.audio_vecs = np.load(f"{path}/wav2lip.npy")
         
@@ -25,7 +26,6 @@ class Audio2FrameDataset(object):
         self.mode = args.mode
         assert load_img is False, "loading image not supported yet"
 
-        split_ratio = 0.9
         split_num = int(split_ratio * len(self.audio_vecs))
         if split == "train":
             self.audio_vecs = self.audio_vecs[:split_num]

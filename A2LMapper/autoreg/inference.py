@@ -87,7 +87,7 @@ def validate(args, data_loader, model):
         tgt_mask = tgt_mask.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
-        if args.mode == "debug":
+        if args.mode == "copy":
             predict_tgt = prev_tgt
         assert predict_tgt.shape == tgt.shape
         assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
@@ -103,45 +103,6 @@ def validate(args, data_loader, model):
 
     return np.mean(losses)
 
-"""
-def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
-    model.eval()
-
-    total = len(data_loader)
-    neutral_vec = neutral_vec.reshape(1, -1).type(torch.float32)
-
-    losses = []
-    
-    output_dim = model.output_dim
-    cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
-    counter = 0
-    # todo(demi): support rolling/overlapping source context
-
-    def subsequent_mask(size):
-        mask = 1-np.triu(np.ones((1,size,size)),k=1)
-        return torch.from_numpy(mask).cuda()
-
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
-        
-        bsz = src.size(0)
-        seq_len = src.size(1)
-        assert bsz == 1
-
-        src = src.cuda()
-        prev_tgt = prev_tgt.cuda()  # not actually used
-        tgt = tgt.cuda()  # not actually used
-        src_mask = src_mask.cuda()
-        tgt_mask = tgt_mask.cuda()  # not actually used
-        
-        predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
-        assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
-
-        for i in range(seq_len):
-            torch.save(predict_tgt[0][i].reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
-            counter += 1
-
-    return 
-"""
 
 def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
     model.eval()
@@ -179,7 +140,7 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
             out = model.decode(memory, src_mask, prev_tgt, tgt_mask, gen=False)
             assert out.shape[:2] == (bsz, prev_tgt.size(1))
             predict_tgt = model.generate(out[:, -1])
-            if args.mode == "debug":
+            if args.mode == "copy":
                 predict_tgt = predict_tgt*0
             
             torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
@@ -342,11 +303,16 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(f"{args.output}/best_val_checkpoint.pt")["model_state_dict"])
         
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)  # now, train and test has to be the same face
-    
+
+
+ 
+    train_loss = validate(args, train_data_loader, model)
     val_loss = validate(args, val_data_loader, model)
     test_loss = validate(args, test_data_loader, model)
+    print("train loss=", train_loss)
     print("val loss=", val_loss)
     print("test loss=", test_loss)
+
 
     infer_dir = f"{args.output}/tf_inference"
     if not os.path.exists(infer_dir):
