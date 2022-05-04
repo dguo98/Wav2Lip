@@ -6,7 +6,6 @@ import numpy as np
 from IPython import embed
 import torch.nn.functional as F
 
-
 class EncoderDecoder(nn.Module):
     """
     A standard Encoder-Decoder architecture. Base for this and many 
@@ -286,78 +285,6 @@ class LinearMapper(torch.nn.Module):
     def generate(self, out):
         return out
 
-class Conv1D(nn.Module):
-    def __init__(self, cin, cout, kernel_size, stride, padding, residual=False, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.conv_block = nn.Sequential(
-                            nn.Conv1d(cin, cout, kernel_size, stride, padding),
-                            nn.BatchNorm1d(cout)
-                            )
-        self.act = nn.ReLU()
-        self.residual = residual
-
-    def forward(self, x):
-        out = self.conv_block(x)
-        if self.residual:
-            out += x
-        return self.act(out)
-
-
-class AutoRegConvMapper(torch.nn.Module):
-    def __init__(self, args, input_dim=512, output_dim=512*18):
-        super(AutoRegConvMapper, self).__init__()
-        self.args = args
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.seq_len = args.seq_len
-        self.nlayer = args.nlayer
-        self.hidden_dim = args.hidden_dim
-
-        self.layers = nn.ModuleList()
-
-        # weight tying, conversion
-        self.conversion_weight = nn.Parameter(torch.randn(self.hidden_dim, self.output_dim))
-        
-        self.layers.append(Conv1D(self.input_dim+self.hidden_dim, self.hidden_dim, kernel_size=3, stride=1, padding=1))
-        
-        tmp_len = self.seq_len
-        # NB(demi): are channels size too large
-        while (tmp_len > 1):
-            assert tmp_len % 2 == 0
-            self.layers.append(Conv1D(self.hidden_dim, self.hidden_dim, kernel_size=3, stride=2, padding=1))
-            for i in range(self.nlayer):
-                self.layers.append(Conv1D(self.hidden_dim, self.hidden_dim, kernel_size=3, stride=1, padding=1, residual=True))
-            tmp_len = tmp_len // 2
-
-    def forward(self, src, tgt, src_mask, tgt_mask):
-        # tgt is prev target
-        bsz, seqlen, _ = src.shape
-        assert tgt.shape == (bsz, seqlen, self.output_dim)
-        
-        # convert
-        tgt = F.linear(tgt.reshape(-1, self.output_dim), self.conversion_weight).reshape(bsz, seqlen, self.hidden_dim)
-        inp = torch.cat([src, tgt], dim=2)
-        assert inp.shape == (bsz, seqlen, self.input_dim+self.hidden_dim)
-        x = inp.permute((0, 2, 1))  # [bsz, C, L]
-
-        for layer in self.layers:
-            x = layer(x)
-        assert x.shape == (bsz, self.hidden_dim, 1)
-        #print("self.conversion_weight.t() shape=", self.conversion_weight.t().shape)
-        x = F.linear(x.reshape(bsz, self.hidden_dim), self.conversion_weight.t())
-        return x.reshape(bsz, 1, self.output_dim)
-
-    def encode(self, src, src_mask):
-        return src
-
-    def decode(self, memory, src_mask, tgt, tgt_mask, gen=True):
-        src = memory
-        return self.forward(src, tgt, src_mask, tgt_mask)
-
-    def generate(self, out):
-        return out
-
-
 class AutoRegMLPMapper(torch.nn.Module):
     def __init__(self, args, input_dim=512, output_dim=512*18):
         super(AutoRegMLPMapper, self).__init__()
@@ -366,20 +293,16 @@ class AutoRegMLPMapper(torch.nn.Module):
         self.output_dim = output_dim
         self.hidden_dim = args.hidden_dim
         self.nlayer = args.nlayer
-        self.residual = args.mlp_residual == 1
-        
-        self.dropout = nn.Dropout(args.mlp_dropout)
+
         self.layers = nn.ModuleList()
         if self.nlayer == 1:
             self.layers.append(nn.Linear(self.input_dim+self.output_dim, self.output_dim))
         else:
-            self.layers.append(nn.Sequential(
-                nn.Linear(self.input_dim+self.output_dim, self.hidden_dim),
-                nn.ReLU()))
+            self.layers.append(nn.Linear(self.input_dim+self.output_dim, self.hidden_dim))
             for i in range(self.nlayer-2):
-                self.layers.append(nn.Sequential(
-                    nn.Linear(self.hidden_dim, self.hidden_dim),
-                    nn.ReLU()))
+                self.layers.append(nn.ReLU())
+                self.layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
+            self.layers.append(nn.ReLU())
             self.layers.append(nn.Linear(self.hidden_dim, self.output_dim))
 
 
@@ -394,11 +317,8 @@ class AutoRegMLPMapper(torch.nn.Module):
         inp = inp.reshape(bsz, self.input_dim+self.output_dim)
         
         x = inp
-        for i, layer in enumerate(self.layers):
-            if i == 0 or i == len(self.layers)-1 or (not self.residual):
-                x = self.dropout(layer(x))
-            else:
-                x = x + self.dropout(layer(x)) 
+        for layer in self.layers:
+            x = layer(x)
 
         return x.reshape(bsz, 1, self.output_dim)
         
@@ -408,8 +328,19 @@ class AutoRegMLPMapper(torch.nn.Module):
 
     def decode(self, memory, src_mask, tgt, tgt_mask, gen=True):
         src = memory
-        return self.forward(src, tgt, src_mask, tgt_mask)
+        bsz, seq_len = src.shape[:2]
+        assert seq_len == 1
+        assert torch.sum(1-src_mask).item() == 0 and torch.sum(1-tgt_mask).item() == 0
 
+        inp = torch.cat([src, tgt], dim=2)
+        inp = inp.reshape(bsz, self.input_dim+self.output_dim)
+        
+        x = inp
+        for layer in self.layers:
+            x = layer(x)
+
+        return x.reshape(bsz, 1, self.output_dim)
+    
     def generate(self, out):
         return out
 

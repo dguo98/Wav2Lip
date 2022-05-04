@@ -17,7 +17,7 @@ from torch.utils import data as data_utils
 
 sys.path.append(".")
 from dataset import Audio2FrameDataset
-from model import Transformer, LinearMapper, AutoRegMLPMapper
+from model import Transformer, LinearMapper, AutoRegMLPMapper, AutoRegConvMapper
 from optim import NoamOpt
 
 def train(args, data_loader, model, opt):
@@ -39,6 +39,12 @@ def train(args, data_loader, model, opt):
         tgt = tgt.cuda()
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
+
+        if args.model == "conv":
+            assert torch.sum(1-src_mask).item() == 0  # sanity check
+            tgt = tgt[:, -1, :].reshape(bsz, 1, -1)  # only predict last
+            seq_len = 1
+            src_mask = src_mask[:, 0:1, 0:1]  # hack
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
@@ -49,9 +55,6 @@ def train(args, data_loader, model, opt):
         else:
             loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
             loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
-            #print("mean=", torch.nn.MSELoss(reduction="mean")(predict_tgt,tgt))
-            #print("try to run sum (loss*loss_mask) / sum(loss_mask)")
-            #embed()
             assert loss.shape == (bsz, seq_len, model.output_dim)
             
             loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(dtype=loss.dtype)
@@ -85,7 +88,13 @@ def validate(args, data_loader, model):
         tgt = tgt.cuda()
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
-        
+
+        if args.model == "conv":
+            assert torch.sum(1-src_mask).item() == 0  # sanity check
+            tgt = tgt[:, -1, :].reshape(bsz, 1, -1)  # only predict last
+            seq_len = 1
+            src_mask = src_mask[:, 0:1, 0:1]  # hack
+         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         if args.mode == "debug":
             predict_tgt = predict_tgt * 0
@@ -102,7 +111,66 @@ def validate(args, data_loader, model):
         losses.append(loss.item())
 
     return np.mean(losses)
+
+# NB(demi): for conv net, fixed input sequence length
+def rolling_inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
+    assert mode in ["autoreg", "tf"]
+    model.eval()
+
+    total = len(data_loader)
+    neutral_vec = neutral_vec.reshape(1, -1).type(torch.float32)
+
+    losses = []
+    
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+    cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
+
+    counter = 0
+
+    def subsequent_mask(size):
+        mask = 1-np.triu(np.ones((1,size,size)),k=1)
+        return torch.from_numpy(mask).cuda()
+
+    rolling_src = torch.zeros((1, args.seq_len, input_dim)).cuda()
+    rolling_prev_tgt = cur_vec.reshape(1,1,output_dim).expand(-1, args.seq_len, -1)
  
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+        
+        bsz = src.size(0)
+        seq_len = src.size(1)
+        assert bsz == 1
+
+        src = src.cuda()
+        prev_tgt = prev_tgt.cuda()  # not actually used
+        tgt = tgt.cuda()  # not actually used
+        src_mask = src_mask.cuda()
+        tgt_mask = tgt_mask.cuda()  # not actually used
+
+        if n_iter == 0:
+            rolling_src = src[:, :1].reshape(1, 1, input_dim).expand(1, args.seq_len, input_dim)
+        
+        for i in range(seq_len):
+            rolling_src = torch.cat([rolling_src[:, 1:, :], src[:, i:i+1,:]], dim=1)
+            assert rolling_src.shape == src.shape
+
+            memory = model.encode(rolling_src, None)
+            out = model.decode(memory, None, rolling_prev_tgt, None, gen=False)
+            #assert out.shape[:2] == (bsz, prev_tgt.size(1))
+            predict_tgt = model.generate(out[:, -1])
+            
+            torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
+            counter += 1
+            
+            if mode == "tf":
+                predict_tgt = tgt[0, i]  # teacher forcing
+
+            rolling_prev_tgt = torch.cat([rolling_prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
+            rolling_prev_tgt = rolling_prev_tgt[:, 1:]
+            assert rolling_prev_tgt.shape == (1, args.seq_len, output_dim)
+
+    return 
+
 def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     assert mode in ["autoreg", "tf"]
     model.eval()
@@ -171,6 +239,8 @@ if __name__ == "__main__":
     # MLP parameters
     parser.add_argument("--nlayer", type=int, default=2)
     parser.add_argument("--hidden_dim", type=int, default=1024)
+    parser.add_argument("--mlp_dropout", type=float, default=0.0)
+    parser.add_argument("--mlp_residual", type=int, default=0)
     
     # transformer parameters
     parser.add_argument("--h", type=int, default=2)
@@ -197,7 +267,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    assert args.model in ["transformer", "mlp", "linear"]
+    assert args.model in ["transformer", "mlp", "linear", "conv"]
     if args.model == "mlp":
         if args.seq_len != 1:
             print("warning: seq_len is forced to set to 1")
@@ -241,7 +311,11 @@ if __name__ == "__main__":
     elif args.model == "linear":
         model = LinearMapper(args).to(device)
         d_model = 512
+    elif args.model == "conv":
+        model = AutoRegConvMapper(args).to(device)
+        d_model = args.hidden_dim
     else:
+        assert args.model == "mlp"
         model = AutoRegMLPMapper(args).to(device)
         d_model = args.hidden_dim
 
@@ -299,13 +373,19 @@ if __name__ == "__main__":
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
+    if args.model == "conv":
+        rolling_inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
+    else:
+        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
 
     infer_dir = f"{args.output}/inference"
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
+    if args.model == "conv":
+        rolling_inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
+    else:
+        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
 
 
     x = list(range(args.epochs))

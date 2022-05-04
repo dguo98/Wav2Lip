@@ -10,6 +10,7 @@ class Audio2FrameDataset(object):
         self.path = path
         self.seq_len = args.seq_len
         self.split_ratio = split_ratio
+        self.model = args.model
 
         self.input_dim=input_dim
         self.output_dim=output_dim
@@ -44,9 +45,13 @@ class Audio2FrameDataset(object):
 
     def __len__(self):
         if self.split == "train":
-            return self.data_len
+            if self.model == "conv":
+                return self.data_len - self.seq_len + 1
+            else:
+                return self.data_len
         else:
-            if self.data_len % self.seq_len == 0:
+            if self.data_len % self.seq_len == 0 or self.model == "conv":
+                # NB(demi): for now, even for test, it will ignore the rest 
                 return self.data_len // self.seq_len
             else:
                 return self.data_len // self.seq_len + 1
