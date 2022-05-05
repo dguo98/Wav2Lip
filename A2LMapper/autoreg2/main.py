@@ -32,7 +32,7 @@ def train(args, data_loader, model, opt):
 
         bsz = src.size(0)
         seq_len = src.size(1)
-        assert src.shape == (bsz, seq_len, 512)
+        assert src.shape == (bsz, seq_len, model.input_dim)
         
         src = src.cuda()
         prev_tgt = prev_tgt.cuda()
@@ -78,7 +78,7 @@ def validate(args, data_loader, model):
 
         bsz = src.size(0)
         seq_len = src.size(1)
-        assert src.shape == (bsz, seq_len, 512)
+        assert src.shape == (bsz, seq_len, model.input_dim)
         
         src = src.cuda()
         prev_tgt = prev_tgt.cuda()
@@ -188,6 +188,7 @@ if __name__ == "__main__":
     parser.add_argument("--pca", type=str, default=None)
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
     parser.add_argument("--model", type=str, default="transformer")
+    parser.add_argument("--use_pose", type=int, default=0)
 
     # MLP parameters
     parser.add_argument("--nlayer", type=int, default=2)
@@ -267,20 +268,24 @@ if __name__ == "__main__":
      
     # models and optimizers
     print("loading models")
+    
+    input_dim = 512
+    output_dim = 512*18
+    if args.pca is not None:
+        output_dim = len(args.pca_dims)
+    if args.use_pose == 1:
+        input_dim = input_dim + 6
+
     if args.model == "transformer":
-        if args.pca is None:
-            output_dim = 512*18
-        else:
-            output_dim = len(args.pca_dims)
-        model = Transformer(args, output_dim=output_dim)
+        model = Transformer(args, input_dim=input_dim, output_dim=output_dim)
         print("loaded transformer on cpu")
         model = model.to(device)
         d_model = model.model.src_embed[0].d_model
     elif args.model == "linear":
-        model = LinearMapper(args).to(device)
+        model = LinearMapper(args, input_dim=input_dim, output_dim=output_dim).to(device)
         d_model = 512
     else:
-        model = AutoRegMLPMapper(args).to(device)
+        model = AutoRegMLPMapper(args, input_dim=input_dim, output_dim=output_dim).to(device)
         d_model = args.hidden_dim
 
     if args.load_ckpt is not None:

@@ -13,6 +13,7 @@ class Audio2FrameDataset(object):
         self.seq_len = args.seq_len
         self.split_ratio = split_ratio
         self.sample = sample  # sample strategy: [dense, sparse]
+        self.use_pose = args.use_pose == 1
 
         self.input_dim=input_dim
         self.output_dim=output_dim
@@ -24,15 +25,20 @@ class Audio2FrameDataset(object):
             assert split == "test"
             # NB(demi): only support 1 single test video folder
             self.data_folders = [path]
-       
+        
+
         self.counts = []
         self.audio_vecs_list = []
         self.latent_vecs_list = []
+        self.pose_vecs_list = []
         for folder in tqdm(self.data_folders, desc=f"loading {split} dataset vectors"):
             self.counts.append(self.get_interval_count(folder))
             self.audio_vecs_list.append(np.load(f"{folder}/wav2lip.npy"))
             self.latent_vecs_list.append(np.load(f"{folder}/frame.npy").reshape(-1,18*512))  # NB(demi): even test needs to have frame.npy for now
-
+            if self.use_pose:
+                self.pose_vecs_list.append(np.load(f"{folder}/openface.npy")[:, 2:8].astype(np.float32))
+            else:
+                self.pose_vecs_list.append(np.zeros((len(self.audio_vecs_list[-1]), 6), dtype=np.float32))
         assert len(self.counts) <= 1000, "currently iterate over all folders -- cannot support many folders"
         
         self.data_len = np.sum(np.array(self.counts))
@@ -57,6 +63,7 @@ class Audio2FrameDataset(object):
         folder = self.data_folders[folder_id]
         audio_vecs = self.audio_vecs_list[folder_id]
         latent_vecs = self.latent_vecs_list[folder_id]
+        pose_vecs = self.pose_vecs_list[folder_id]
         folder_len = len(audio_vecs)
 
         if self.sample == "sparse":
@@ -65,6 +72,10 @@ class Audio2FrameDataset(object):
         r_idx = min(folder_len, idx + self.seq_len)
         idxs = np.array(range(idx, r_idx))
         src = audio_vecs[idx: r_idx]
+
+        if self.use_pose:
+            src = np.concatenate([src, pose_vecs[idx:r_idx]], axis=1)
+            assert src.shape == (r_idx-idx, len(audio_vecs[0])+len(pose_vecs[0]))
 
         if idx == 0:
             prev_tgt = latent_vecs[0:r_idx-1]
