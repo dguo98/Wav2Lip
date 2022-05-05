@@ -14,6 +14,7 @@ class Audio2FrameDataset(object):
         self.split_ratio = split_ratio
         self.sample = sample  # sample strategy: [dense, sparse]
         self.use_pose = args.use_pose == 1
+        self.latent_type = args.latent_type
 
         self.input_dim=input_dim
         self.output_dim=output_dim
@@ -34,7 +35,13 @@ class Audio2FrameDataset(object):
         for folder in tqdm(self.data_folders, desc=f"loading {split} dataset vectors"):
             self.counts.append(self.get_interval_count(folder))
             self.audio_vecs_list.append(np.load(f"{folder}/wav2lip.npy"))
-            self.latent_vecs_list.append(np.load(f"{folder}/frame.npy").reshape(-1,18*512))  # NB(demi): even test needs to have frame.npy for now
+            
+            if self.latent_type == "w+":
+                self.latent_vecs_list.append(np.load(f"{folder}/frame.npy").reshape(-1,18*512))  # NB(demi): even test needs to have frame.npy for now
+            elif self.latent_type == "stylespace":
+                self.latent_vecs_list.append(np.load(f"{folder}/frame_stylespace.npy").reshape(-1,9088)) 
+            else:
+                raise NotImplementedError
             if self.use_pose:
                 self.pose_vecs_list.append(np.load(f"{folder}/openface.npy")[:, 2:8].astype(np.float32))
             else:

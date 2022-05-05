@@ -113,10 +113,11 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
     losses = []
     
     output_dim = model.output_dim
+    org_output_dim = model.org_output_dim
     cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
     if args.pca is not None:  
         # quite hacky now -- in theory we can rewrite pca on torch
-        cur_vec = torch.zeros_like(neutral_vec).cpu().numpy().reshape(1, 512*18)
+        cur_vec = torch.zeros_like(neutral_vec).cpu().numpy().reshape(1, org_output_dim)
         cur_vec = args.pca.transform(cur_vec)[:, args.pca_dims]
         cur_vec = torch.from_numpy(cur_vec).cuda()
          
@@ -127,6 +128,7 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
         mask = 1-np.triu(np.ones((1,size,size)),k=1)
         return torch.from_numpy(mask).cuda()
 
+    new_vecs_list = []
     for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
         
         bsz = src.size(0)
@@ -157,9 +159,11 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
                 new_vecs[:, args.pca_dims] = vecs
                 new_vecs = args.pca.inverse_transform(new_vecs)
                 new_vecs = new_vecs + args.neutral_vec
+                new_vecs_list.append(new_vecs.reshape(-1)
                 new_vecs = torch.from_numpy(new_vecs).reshape(-1)
                 torch.save(new_vecs, f"{infer_dir}/predict_{counter:06d}.pt")
             else:
+                new_vecs_list.append((predict_tgt+neutral_vec).reshape(-1).detach().cpu().numpy())
                 torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
             counter += 1
             
@@ -167,6 +171,12 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
             prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
             cur_vec = predict_tgt
             assert prev_tgt.shape == (bsz, i+2, output_dim)
+    final_vecs = np.stack(new_vecs_list, axis=0)
+    if args.latent_type == "stylespace":
+        np.save(f"{infer_dir}/predict.npy", final_vecs)
+        os.system(f"rm {infer_dir}/predict_*.pt")
+    assert final_vecs.shape == (len(data_loader), org_output_dim)
+
 
     return 
 
@@ -179,11 +189,12 @@ def inference(args, data_loader, model, infer_dir, neutral_vec):
     losses = []
     
     output_dim = model.output_dim
+    org_output_dim = model.org_output_dim
     cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
     counter = 0
     if args.pca is not None:  
         # quite hacky now -- in theory we can rewrite pca on torch
-        cur_vec = torch.zeros_like(neutral_vec).cpu().numpy().reshape(1, 512*18)
+        cur_vec = torch.zeros_like(neutral_vec).cpu().numpy().reshape(1, org_output_dim)
         cur_vec = args.pca.transform(cur_vec)[:, args.pca_dims]
         cur_vec = torch.from_numpy(cur_vec).cuda()
          
@@ -192,6 +203,8 @@ def inference(args, data_loader, model, infer_dir, neutral_vec):
     def subsequent_mask(size):
         mask = 1-np.triu(np.ones((1,size,size)),k=1)
         return torch.from_numpy(mask).cuda()
+
+    new_vecs_list = []
 
     for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
         
@@ -223,15 +236,22 @@ def inference(args, data_loader, model, infer_dir, neutral_vec):
                 new_vecs[:, args.pca_dims] = vecs
                 new_vecs = args.pca.inverse_transform(new_vecs)
                 new_vecs = new_vecs + args.neutral_vec
+                new_vecs_list.append(new_vecs.reshape(-1)
                 new_vecs = torch.from_numpy(new_vecs).reshape(-1)
                 torch.save(new_vecs, f"{infer_dir}/predict_{counter:06d}.pt")
             else:
+                new_vecs_list.append((predict_tgt+neutral_vec).reshape(-1).detach().cpu().numpy())
                 torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
             counter += 1
 
             prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
             cur_vec = predict_tgt
             assert prev_tgt.shape == (bsz, i+2, output_dim)
+    final_vecs = np.stack(new_vecs_list, axis=0)
+    if args.latent_type == "stylespace":
+        np.save(f"{infer_dir}/predict.npy", final_vecs)
+        os.system(f"rm {infer_dir}/predict_*.pt")
+    assert final_vecs.shape == (len(data_loader), org_output_dim)
 
     return 
 
@@ -246,6 +266,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=0)
     
     parser.add_argument("--mode", type=str, default="default", help="support: [default]")
+    parser.add_argument("--latent_type", type=str, default="w+", help="latent types: [w+, stylespace]")
+
     parser.add_argument("--pca", type=str, default=None)
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
     parser.add_argument("--model", type=str, default="transformer")
@@ -282,9 +304,9 @@ if __name__ == "__main__":
     # load pca
     if args.neutral_path is None:
         assert args.pca is None, "pca need to specify corresponding neutral path"
-        args.neutral_vec = np.load(f"{args.train_path}/neutral.npy").reshape(1,18*512)
+        args.neutral_vec = np.load(f"{args.train_path}/neutral.npy").reshape(1,-1)
     else:
-        args.neutral_vec = np.load(args.neutral_path).reshape(1, 18*512)
+        args.neutral_vec = np.load(args.neutral_path).reshape(1, -1)
 
     device = torch.device("cuda")
     args.device = device
@@ -295,13 +317,22 @@ if __name__ == "__main__":
         
         if args.pca_dims is None:
             args.pca_dims = list(range(args.pca.n_components_))
-
-
+    
+    # input dim, output dim for datasets
+    input_dim = 512
+    if args.latent_type == "w+":
+        output_dim=512*18
+    elif args.latent_type == "stylespace":
+        output_dim=9088
+    else:
+        raise NotImplementedError
+    org_output_dim = output_dim
+ 
     # datasets
     print("loading datasets")
-    train_dataset = Audio2FrameDataset(args, args.train_path, "train",sample="dense") 
-    val_dataset = Audio2FrameDataset(args, args.train_path, "val", sample="sparse")
-    test_dataset = Audio2FrameDataset(args, args.test_path, "test",sample="sparse")
+    train_dataset = Audio2FrameDataset(args, args.train_path, "train",sample="dense", input_dim=input_dim, output_dim=output_dim) 
+    val_dataset = Audio2FrameDataset(args, args.train_path, "val", sample="sparse", input_dim=input_dim, output_dim=output_dim)
+    test_dataset = Audio2FrameDataset(args, args.test_path, "test",sample="sparse", input_dim=input_dim, output_dim=output_dim)
 
     # HACK(demi)
     #test_dataset.data_len = min(test_dataset.data_len, 500)
@@ -324,19 +355,21 @@ if __name__ == "__main__":
      
     # models and optimizers
     print("loading models")
+    if args.pca is not None:
+        output_dim = len(args.pca_dims)
+    if args.use_pose == 1:
+        input_dim = input_dim + 6
+
     if args.model == "transformer":
-        if args.pca is None:
-            output_dim = 512*18
-        else:
-            output_dim = len(args.pca_dims)
-        model = Transformer(args, output_dim=output_dim)
+        model = Transformer(args, input_dim=input_dim, output_dim=output_dim)
         print("loaded transformer on cpu")
         model = model.to(device)
         d_model = model.model.src_embed[0].d_model
-    else:
-        assert args.model == "linear"
-        model = LinearMapper(args).to(device)
+    elif args.model == "linear":
+        model = LinearMapper(args, input_dim=input_dim, output_dim=output_dim).to(device)
         d_model = 512
+    else:
+        raise NotImplementedError
 
     print("loading optimizer") 
     if args.optim == "noam":
