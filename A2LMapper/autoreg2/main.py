@@ -159,7 +159,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
                 new_vecs[:, args.pca_dims] = vecs
                 new_vecs = args.pca.inverse_transform(new_vecs)
                 new_vecs = new_vecs + args.neutral_vec
-                new_vecs_list.append(new_vecs.reshape(-1)
+                new_vecs_list.append(new_vecs.reshape(-1))
                 new_vecs = torch.from_numpy(new_vecs).reshape(-1)
                 torch.save(new_vecs, f"{infer_dir}/predict_{counter:06d}.pt")
             else:
@@ -175,7 +175,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     
     final_vecs = np.stack(new_vecs_list, axis=0)
     if args.latent_type == "stylespace":
-        np.save(f"{infer_dir}/predict.npy", final_vecs)
+        np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
         os.system(f"rm {infer_dir}/predict_*.pt")
     assert final_vecs.shape == (len(data_loader), org_output_dim)
     return 
@@ -193,7 +193,6 @@ if __name__ == "__main__":
 
 
     parser.add_argument("--num_workers", type=int, default=0)
-    
     parser.add_argument("--mode", type=str, default="default", help="support: [default]")
     parser.add_argument("--latent_type", type=str, default="w+", help="latent types: [w+, stylespace]")
 
@@ -241,7 +240,7 @@ if __name__ == "__main__":
     # load pca
     if args.neutral_path is None:
         assert args.pca is None, "pca need to specify corresponding neutral path"
-        args.neutral_vec = np.load(f"{args.train_path}/neutral.npy").reshape(1,-1)
+        args.neutral_vec = np.load(f"{args.train_path}/neutral_{args.latent_type}.npy").reshape(1,-1)
     else:
         args.neutral_vec = np.load(args.neutral_path).reshape(1, -1)
 
@@ -263,12 +262,20 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
     org_output_dim = output_dim
+    if args.use_pose == 1:
+        input_dim = input_dim + 6
+
     
     # datasets
     print("loading datasets")
     train_dataset = Audio2FrameDataset(args, args.train_path, "train", sample="dense", input_dim=input_dim, output_dim=output_dim) 
     val_dataset = Audio2FrameDataset(args, args.train_path, "val", sample="sparse", input_dim=input_dim, output_dim=output_dim)
     test_dataset = Audio2FrameDataset(args, args.test_path, "test", sample="sparse", input_dim=input_dim, output_dim=output_dim)
+    
+    if args.mode == "sanity_check":
+        train_dataset.data_len = 100
+        val_dataset.data_len=100
+        test_dataset.data_len=50
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -292,9 +299,6 @@ if __name__ == "__main__":
     # transform to model's input dim and output dim
     if args.pca is not None:
         output_dim = len(args.pca_dims)
-    if args.use_pose == 1:
-        input_dim = input_dim + 6
-
     if args.model == "transformer":
         model = Transformer(args, input_dim=input_dim, output_dim=output_dim)
         print("loaded transformer on cpu")

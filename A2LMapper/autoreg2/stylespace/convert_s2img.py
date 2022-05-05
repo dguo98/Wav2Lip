@@ -27,11 +27,10 @@ if __name__ == "__main__":
     s_shapes = [512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,256,256,256,128,128,128,64,64,64,32,32]
     s_latents = np.load(f"{args.input}/predict_stylespace.npy")
 
-    # HACK(demi)
-    s_latents = s_latents[:300]
+    #s_latents = s_latents[:300]
 
     n = len(s_latents)
-    for i in range(0, n, args.bsz):
+    for i in tqdm(range(0, n, args.bsz), desc="converting to images"):
         j = min(n, i+args.bsz)
         
         # break down into layers, formatting

@@ -159,7 +159,7 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
                 new_vecs[:, args.pca_dims] = vecs
                 new_vecs = args.pca.inverse_transform(new_vecs)
                 new_vecs = new_vecs + args.neutral_vec
-                new_vecs_list.append(new_vecs.reshape(-1)
+                new_vecs_list.append(new_vecs.reshape(-1))
                 new_vecs = torch.from_numpy(new_vecs).reshape(-1)
                 torch.save(new_vecs, f"{infer_dir}/predict_{counter:06d}.pt")
             else:
@@ -173,7 +173,7 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
             assert prev_tgt.shape == (bsz, i+2, output_dim)
     final_vecs = np.stack(new_vecs_list, axis=0)
     if args.latent_type == "stylespace":
-        np.save(f"{infer_dir}/predict.npy", final_vecs)
+        np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
         os.system(f"rm {infer_dir}/predict_*.pt")
     assert final_vecs.shape == (len(data_loader), org_output_dim)
 
@@ -236,7 +236,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec):
                 new_vecs[:, args.pca_dims] = vecs
                 new_vecs = args.pca.inverse_transform(new_vecs)
                 new_vecs = new_vecs + args.neutral_vec
-                new_vecs_list.append(new_vecs.reshape(-1)
+                new_vecs_list.append(new_vecs.reshape(-1))
                 new_vecs = torch.from_numpy(new_vecs).reshape(-1)
                 torch.save(new_vecs, f"{infer_dir}/predict_{counter:06d}.pt")
             else:
@@ -249,7 +249,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec):
             assert prev_tgt.shape == (bsz, i+2, output_dim)
     final_vecs = np.stack(new_vecs_list, axis=0)
     if args.latent_type == "stylespace":
-        np.save(f"{infer_dir}/predict.npy", final_vecs)
+        np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
         os.system(f"rm {infer_dir}/predict_*.pt")
     assert final_vecs.shape == (len(data_loader), org_output_dim)
 
@@ -267,6 +267,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--mode", type=str, default="default", help="support: [default]")
     parser.add_argument("--latent_type", type=str, default="w+", help="latent types: [w+, stylespace]")
+    parser.add_argument("--use_pose", type=int, default=0)
 
     parser.add_argument("--pca", type=str, default=None)
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
@@ -304,7 +305,7 @@ if __name__ == "__main__":
     # load pca
     if args.neutral_path is None:
         assert args.pca is None, "pca need to specify corresponding neutral path"
-        args.neutral_vec = np.load(f"{args.train_path}/neutral.npy").reshape(1,-1)
+        args.neutral_vec = np.load(f"{args.train_path}/neutral_{args.latent_type}.npy").reshape(1,-1)
     else:
         args.neutral_vec = np.load(args.neutral_path).reshape(1, -1)
 
@@ -327,6 +328,9 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
     org_output_dim = output_dim
+    if args.use_pose == 1:
+        input_dim = input_dim + 6
+
  
     # datasets
     print("loading datasets")
@@ -370,6 +374,7 @@ if __name__ == "__main__":
         d_model = 512
     else:
         raise NotImplementedError
+    model.org_output_dim = org_output_dim
 
     print("loading optimizer") 
     if args.optim == "noam":
