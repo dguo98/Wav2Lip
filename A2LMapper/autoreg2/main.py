@@ -49,13 +49,19 @@ def train(args, data_loader, model, opt):
         else:
             loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
             loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
-            #print("mean=", torch.nn.MSELoss(reduction="mean")(predict_tgt,tgt))
-            #print("try to run sum (loss*loss_mask) / sum(loss_mask)")
-            #embed()
             assert loss.shape == (bsz, seq_len, model.output_dim)
             
+            if args.channel_weight >= 0.0:
+                channel_mask = args.channel_mask.reshape(1, 1, model.output_dim)
+                # re-weight channels
+                loss1 = channel_mask * loss * (model.output_dim * args.channel_weight / torch.sum(args.channel_mask)) 
+                loss2 = (1-channel_mask) * loss * (model.output_dim * (1-args.channel_weight) / torch.sum(1-args.channel_mask))
+                loss = loss1 + loss2
+                # todo(demi): double check if this reweighting scheme makes sense
+                print("selected loss1=", torch.sum(channel_mask*loss*loss_mask)/torch.sum(loss_mask))
+                print("loss2=", torch.sum((1-channel_mask)*loss*loss_mask)/torch.sum(loss_mask))
+
             loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(dtype=loss.dtype)
-            #loss = loss * model.output_dim  # only average across batch, and sequence, but not dimensions
 
         # MSE Loss for now
         losses.append(loss.item())
@@ -95,6 +101,12 @@ def validate(args, data_loader, model):
         loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
         loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
         assert loss.shape == (bsz, seq_len, model.output_dim)
+
+        if args.channel_weight >= 0.0:
+           channel_mask = args.channel_mask.reshape(1, 1, model.output_dim)
+           # re-weight channels
+           loss = channel_mask * loss * (model.output_dim * args.channel_weight / torch.sum(args.channel_mask)) + \
+            (1-channel_mask) * loss * (model.output_dim * (1-args.channel_weight) / torch.sum(1-args.channel_mask))
         loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(loss.dtype)
         #loss = loss * model.output_dim  # only average across batch, and sequence, but not dimensions
 
@@ -200,6 +212,8 @@ if __name__ == "__main__":
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
     parser.add_argument("--model", type=str, default="transformer")
     parser.add_argument("--use_pose", type=int, default=0)
+    parser.add_argument("--channel_weight", type=float, default=-1)
+    parser.add_argument("--channel_mask", type=str, default=None)
 
     # MLP parameters
     parser.add_argument("--nlayer", type=int, default=2)
@@ -243,6 +257,7 @@ if __name__ == "__main__":
         args.neutral_vec = np.load(f"{args.train_path}/neutral_{args.latent_type}.npy").reshape(1,-1)
     else:
         args.neutral_vec = np.load(args.neutral_path).reshape(1, -1)
+    
 
     device = torch.device("cuda")
     args.device = device
@@ -253,6 +268,7 @@ if __name__ == "__main__":
         
         if args.pca_dims is None:
             args.pca_dims = list(range(args.pca.n_components_))
+    
 
     input_dim = 512
     if args.latent_type == "w+":
@@ -299,6 +315,13 @@ if __name__ == "__main__":
     # transform to model's input dim and output dim
     if args.pca is not None:
         output_dim = len(args.pca_dims)
+
+    # load channel mask
+    if args.channel_weight > 0.0:
+        assert args.channel_mask is not None 
+        args.channel_mask = torch.from_numpy(np.load(args.channel_mask).reshape(-1)).to(device)
+        assert len(args.channel_mask) == output_dim
+
     if args.model == "transformer":
         model = Transformer(args, input_dim=input_dim, output_dim=output_dim)
         print("loaded transformer on cpu")
