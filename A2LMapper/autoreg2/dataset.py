@@ -4,6 +4,7 @@ import sys
 import numpy as np
 from glob import glob
 from tqdm import tqdm
+from PIL import Image
 
 class Audio2FrameDataset(object):
     def __init__(self, args, path, split, load_img=False, split_ratio=0.9, input_dim=512, output_dim=512*18, sample="dense"):
@@ -15,6 +16,9 @@ class Audio2FrameDataset(object):
         self.sample = sample  # sample strategy: [dense, sparse]
         self.use_pose = args.use_pose == 1
         self.latent_type = args.latent_type
+        self.image_type = args.image_type
+        self.image_size = args.image_size
+        self.mouth_box = args.mouth_box
 
         self.input_dim=input_dim
         self.output_dim=output_dim
@@ -32,9 +36,33 @@ class Audio2FrameDataset(object):
         self.audio_vecs_list = []
         self.latent_vecs_list = []
         self.pose_vecs_list = []
+        self.images = []
         for folder in tqdm(self.data_folders, desc=f"loading {split} dataset vectors"):
             self.counts.append(self.get_interval_count(folder))
             self.audio_vecs_list.append(np.load(f"{folder}/wav2lip.npy"))
+            
+            if self.image_type != "none":
+                if self.image_type == "gt":
+                    img_paths = sorted(glob(f"{folder}/frame_aligned/*.jpg"))
+                elif self.image_type == "gan":
+                    img_paths = sorted(glob(f"{folder}/gan_aligned/*.jpg"))
+                else:
+                    raise NotImplementedError
+                
+                assert len(self.audio_vecs_list[-1]) == len(img_paths)
+
+                folder_images = []
+                for img_path in img_paths:
+                    img = Image.open(f"{img_path}").resize((self.image_size, self.image_size))
+                    folder_images.append(np.array(img, dtype=np.float32)/255.)
+                folder_images = np.stack(folder_images, axis=0)
+                print("folder_images.shape=", folder_images.shape)
+                print("folder_images[0]=", folder_images[0])
+                assert folder_images.shape == (len(self.audio_vecs_list[-1]), self.image_size,self.image_size,3)
+                assert np.max(folder_image) <= 1 and np.min(folder_image) >= 0
+                self.images.append(folder_images)
+
+
             
             if self.latent_type == "w+":
                 self.latent_vecs_list.append(np.load(f"{folder}/frame.npy").reshape(-1,18*512))  # NB(demi): even test needs to have frame.npy for now
@@ -71,6 +99,9 @@ class Audio2FrameDataset(object):
         audio_vecs = self.audio_vecs_list[folder_id]
         latent_vecs = self.latent_vecs_list[folder_id]
         pose_vecs = self.pose_vecs_list[folder_id]
+        if self.image_type != "none":
+            image_vecs = self.images[folder_id]
+        
         folder_len = len(audio_vecs)
 
         if self.sample == "sparse":
@@ -79,6 +110,8 @@ class Audio2FrameDataset(object):
         r_idx = min(folder_len, idx + self.seq_len)
         idxs = np.array(range(idx, r_idx))
         src = audio_vecs[idx: r_idx]
+        if self.image_type != "none":
+            imgs = image_vecs[idx: r_idx]
 
         if self.use_pose:
             src = np.concatenate([src, pose_vecs[idx:r_idx]], axis=1)
@@ -109,10 +142,13 @@ class Audio2FrameDataset(object):
             prev_tgt = np.concatenate([prev_tgt, np.zeros((new_len, self.output_dim),dtype=prev_tgt.dtype)],axis=0)
             assert prev_tgt.shape == (self.seq_len, self.output_dim)
             tgt = np.concatenate([tgt, np.zeros((new_len,self.output_dim),dtype=tgt.dtype)],axis=0)
+
             assert tgt.shape == (self.seq_len, self.output_dim)
             
             src_mask = np.concatenate([src_mask, np.zeros(new_len,dtype=src_mask.dtype)],axis=0)
             tgt_mask = np.concatenate([tgt_mask, np.zeros(new_len, dtype=tgt_mask.dtype)],axis=0)
+            if self.image_type != "none":
+                imgs = np.concatenate([imgs, np.zeros((new_len,self.image_size,self.image_size,3),dtype=imgs.dtype)],axis=0)
 
         src_mask = src_mask.reshape(1, self.seq_len)
         tgt_mask = tgt_mask.reshape(1, self.seq_len).repeat(self.seq_len, axis=0)
@@ -126,8 +162,11 @@ class Audio2FrameDataset(object):
         if self.args.pca is not None:
             tgt = self.args.pca.transform(tgt)[:, self.args.pca_dims]
             prev_tgt = self.args.pca.transform(prev_tgt)[:, self.args.pca_dims]
-                
-        return idxs, src, prev_tgt, tgt, src_mask, tgt_mask
+        
+        if self.image_type != "none":
+            return idxs, src, prev_tgt, tgt, src_mask, tgt_mask, imgs
+        else:
+            return idxs, src, prev_tgt, tgt, src_mask, tgt_mask, idxs
 
     def get_neutral(self):
         return self.args.neutral_vec

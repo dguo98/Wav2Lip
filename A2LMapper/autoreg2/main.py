@@ -20,13 +20,15 @@ from dataset import Audio2FrameDataset
 from model import Transformer, LinearMapper, AutoRegMLPMapper
 from optim import NoamOpt
 
-def train(args, data_loader, model, opt):
+from utils.model_utils import setup_model
+
+def train(args, data_loader, model, opt, generator=None):
     model.train()
 
     total = len(data_loader)
 
     losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="train"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="train"):
 
         opt.zero_grad()
 
@@ -39,23 +41,38 @@ def train(args, data_loader, model, opt):
         tgt = tgt.cuda()
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
+        imgs = imgs.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
+        assert args.seq_len > 0
+
+        loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
+        loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
         
-        if args.seq_len == 0:
-            loss = torch.nn.MSELoss(reduction="mean")(predict_tgt,tgt)
-            loss = loss*model.output_dim
-        else:
-            loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
-            loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
-            #print("mean=", torch.nn.MSELoss(reduction="mean")(predict_tgt,tgt))
-            #print("try to run sum (loss*loss_mask) / sum(loss_mask)")
-            #embed()
-            assert loss.shape == (bsz, seq_len, model.output_dim)
-            
+        if args.image_type == "none":
             loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(dtype=loss.dtype)
-            #loss = loss * model.output_dim  # only average across batch, and sequence, but not dimensions
+        else:
+            latents = predict_tgt.reshape(-1, 512, 18) 
+            predict_imgs, _ = generator([latents], input_is_latent=True, randomize_noise=False, return_latents=True) 
+            # predict_imgs: [3, H, W,], values in [-1, 1]
+            predict_imgs = predict_imgs.transpose(1, 3)
+            assert predict_imgs.shape[0] == bsz*seq_len and predict_imgs.shape[-1] == 3
+            predict_imgs = (predict_imgs+1)/2
+            # todo(demi): optionally, clamp to (0,1)
+            if predict_imgs.shape[1] != args.image_size:
+                predict_imgs =  torch.nn.functional.interpolate(predict_imgs, size=(predict_imgs.shape[0], args.image_size, args.image_size, 3), mode='bilinearr')
+            predict_imgs = predict_imgs.reshape(bsz, seq_len, args.image_size, args.image_size, 3)
+            
+            # todo(demi): think about the scale factor design
+            if args.image_mouth == 0.0:
+                image_loss = torch.nn.MSELoss(reduction="none")(predict_imgs, imgs) / (args.image_size**2) / 3 * (model.outupt_dim)  # rescale to same value range
+
+                loss = (1-args.image_loss)*torch.sum(loss*loss_mask) + args.image_loss*torch.sum(image_loss*loss_mask)
+                loss = loss / torch.sum(loss_mask)
+            else:
+                raise NotImplementedError
+
 
         # MSE Loss for now
         losses.append(loss.item())
@@ -68,13 +85,13 @@ def train(args, data_loader, model, opt):
     return np.mean(losses)
         
 
-def validate(args, data_loader, model):
+def validate(args, data_loader, model, generator=None):
     model.eval()
 
     total = len(data_loader)
 
     losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="validate"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="validate"):
 
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -85,6 +102,7 @@ def validate(args, data_loader, model):
         tgt = tgt.cuda()
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
+        imgs = imgs.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         if args.mode == "debug":
@@ -94,9 +112,29 @@ def validate(args, data_loader, model):
 
         loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
         loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
-        assert loss.shape == (bsz, seq_len, model.output_dim)
-        loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(loss.dtype)
-        #loss = loss * model.output_dim  # only average across batch, and sequence, but not dimensions
+        
+        if args.image_type == "none":
+            loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(dtype=loss.dtype)
+        else:
+            latents = predict_tgt.reshape(-1, 512, 18) 
+            predict_imgs, _ = generator([latents], input_is_latent=True, randomize_noise=False, return_latents=True) 
+            # predict_imgs: [3, H, W,], values in [-1, 1]
+            predict_imgs = predict_imgs.transpose(1, 3)
+            assert predict_imgs.shape[0] == bsz*seq_len and predict_imgs.shape[-1] == 3
+            predict_imgs = (predict_imgs+1)/2
+            # todo(demi): optionally, clamp to (0,1)
+            if predict_imgs.shape[1] != args.image_size:
+                predict_imgs =  torch.nn.functional.interpolate(predict_imgs, size=(predict_imgs.shape[0], args.image_size, args.image_size, 3), mode='bilinearr')
+            predict_imgs = predict_imgs.reshape(bsz, seq_len, args.image_size, args.image_size, 3)
+            
+            # todo(demi): think about the scale factor design
+            if args.image_mouth == 0.0:
+                image_loss = torch.nn.MSELoss(reduction="none")(predict_imgs, imgs) / (args.image_size**2) / 3 * (model.outupt_dim)  # rescale to same value range
+
+                loss = (1-args.image_loss)*torch.sum(loss*loss_mask) + args.image_loss*torch.sum(image_loss*loss_mask)
+                loss = loss / torch.sum(loss_mask)
+            else:
+                raise NotImplementedError
 
         # MSE Loss for now
         losses.append(loss.item())
@@ -196,6 +234,16 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, default="default", help="support: [default]")
     parser.add_argument("--latent_type", type=str, default="w+", help="latent types: [w+, stylespace]")
 
+    # image loss
+    parser.add_argument("--image_type", type=str, default="none", help="[none, gt, gan]")
+    parser.add_argument("--image_size", type=int, default=1024, help="must be squre, dataloader first resize image to image size")
+    parser.add_argument("--mouth_box", type=float, nargs="+", default=None)
+
+    parser.add_argument("--img_loss", type=float, default=0.0)
+    parser.add_argument("--img_mouth_loss", type=float, default=0.0)
+    parser.add_argument("--lmk_loss", type=float, default=0.0)
+    
+    # model
     parser.add_argument("--pca", type=str, default=None)
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
     parser.add_argument("--model", type=str, default="transformer")
@@ -317,6 +365,39 @@ if __name__ == "__main__":
         print(f"loading checkpoint from  {args.load_ckpt}")
         model.load_state_dict(torch.load(f"{args.load_ckpt}")["model_state_dict"])
 
+    # load stylegan2
+    if args.image_type != "none":
+        net, opts = setup_model("e4e_ffhq_encode.pt", "cuda")
+        generator = net.decoder
+        generator.eval()
+    else:
+        generator = None
+
+    # load landmark detector
+    if args.image_type != "none" and args.lmk_loss > 0.0:
+        # todo(demi): get hgnet model paths
+        hgnet_model_path = None
+
+        if hgnet_model_path.endswith('.pkl'):
+            hgnet = load_tf_vars(hgnet_model_path, device)
+        elif hgnet_model_path.endswith('.pt'):
+            checkpoint = torch.load(hgnet_model_path)
+            if "model_type" not in checkpoint or checkpoint["model_type"] == "hgnet":
+                hgnet = HGNet(INNER_NUM_LANDMARKS).to(device)
+            elif checkpoint["model_type"] == "hgnet_tf":
+                hgnet = HGNet(INNER_NUM_LANDMARKS, conv=DsConvTF).to(device)
+            else:
+                raise Exception(f"{checkpoint['model_type']} is not supported.")
+
+            hgnet.load_state_dict(checkpoint['model_state_dict'])
+            hgnet.eval()
+        else:
+            assert False
+    else:
+        hgnet = None
+
+
+    # load optimizer
     print("loading optimizer") 
     if args.optim == "noam":
         optimizer = NoamOpt(d_model, 2, args.warmup,
@@ -342,9 +423,9 @@ if __name__ == "__main__":
     last_val = None
     last_train = None
     for epoch in range(args.epochs):
-        train_loss = train(args, train_data_loader, model, optimizer)
+        train_loss = train(args, train_data_loader, model, optimizer, generator=generator)
         print(f"EPOCH[{epoch}] | Train Loss : {train_loss:.3f}")
-        val_loss = validate(args, val_data_loader, model)
+        val_loss = validate(args, val_data_loader, model, generator=generator)
         print(f"EPOCH[{epoch}] | Val Loss : {val_loss:.3f}")
 
         if args.optim == "adam":
