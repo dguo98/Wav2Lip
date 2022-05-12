@@ -31,36 +31,33 @@ class Audio2FrameDataset(object):
             # NB(demi): only support 1 single test video folder
             self.data_folders = [path]
         
+        if args.mode == "debug":
+            self.data_folders = self.data_folders[:1]
 
         self.counts = []
         self.audio_vecs_list = []
         self.latent_vecs_list = []
         self.pose_vecs_list = []
-        self.images = []
+        self.images = []  # if args.img_loss > 0.0, then: it's entire image if args.image_mouth < 1.0, else only mouth image
+
+        if args.mouth_box is not None:
+            x1, y1, x2, y2 = args.mouth_box
+            print("mouth_box=", args.mouth_box)
+            print("x1=",x1, " y1=", y1, "x2=", x2, "y2=", y2)
+
         for folder in tqdm(self.data_folders, desc=f"loading {split} dataset vectors"):
             self.counts.append(self.get_interval_count(folder))
             self.audio_vecs_list.append(np.load(f"{folder}/wav2lip.npy"))
             
+            # load images
             if self.image_type != "none":
-                if self.image_type == "gt":
-                    img_paths = sorted(glob(f"{folder}/frame_aligned/*.jpg"))
-                elif self.image_type == "gan":
-                    img_paths = sorted(glob(f"{folder}/gan_aligned/*.jpg"))
-                else:
-                    raise NotImplementedError
-                
-                assert len(self.audio_vecs_list[-1]) == len(img_paths)
 
-                folder_images = []
-                for img_path in img_paths:
-                    img = Image.open(f"{img_path}").resize((self.image_size, self.image_size))
-                    folder_images.append(np.array(img, dtype=np.float32)/255.)
-                folder_images = np.stack(folder_images, axis=0)
-                print("folder_images.shape=", folder_images.shape)
-                print("folder_images[0]=", folder_images[0])
-                assert folder_images.shape == (len(self.audio_vecs_list[-1]), self.image_size,self.image_size,3)
-                assert np.max(folder_image) <= 1 and np.min(folder_image) >= 0
-                self.images.append(folder_images)
+                # load images
+                if args.img_loss > 0.0:
+                    folder_images = np.load(f"{folder}/{args.image_type}_images.npy")
+                    if args.image_mouth == 1.0:
+                        folder_images = folder_images[:, x1:x2, y1:y2]  # only need mouth to save memory
+                    self.images.append(folder_images)
 
 
             

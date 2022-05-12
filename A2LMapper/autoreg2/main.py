@@ -19,15 +19,22 @@ sys.path.append(".")
 from dataset import Audio2FrameDataset
 from model import Transformer, LinearMapper, AutoRegMLPMapper
 from optim import NoamOpt
+from criterion import get_loss
+from visualize import visualize
 
+# auxiliary models
 from utils.model_utils import setup_model
 
-def train(args, data_loader, model, opt, generator=None):
+# preprocessing
+from preprocess import preprocess_images
+
+def train(args, data_loader, model, opt, aux_models):
     model.train()
 
     total = len(data_loader)
 
     losses = []
+    latent_losses = []
     for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="train"):
 
         opt.zero_grad()
@@ -42,43 +49,24 @@ def train(args, data_loader, model, opt, generator=None):
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
         imgs = imgs.cuda()
+        imgs = imgs.type(torch.float32) / 255.  # convert to float
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
         assert args.seq_len > 0
-
-        loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
-        loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
         
-        if args.image_type == "none":
-            loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(dtype=loss.dtype)
-        else:
-            latents = predict_tgt.reshape(-1, 512, 18) 
-            predict_imgs, _ = generator([latents], input_is_latent=True, randomize_noise=False, return_latents=True) 
-            # predict_imgs: [3, H, W,], values in [-1, 1]
-            predict_imgs = predict_imgs.transpose(1, 3)
-            assert predict_imgs.shape[0] == bsz*seq_len and predict_imgs.shape[-1] == 3
-            predict_imgs = (predict_imgs+1)/2
-            # todo(demi): optionally, clamp to (0,1)
-            if predict_imgs.shape[1] != args.image_size:
-                predict_imgs =  torch.nn.functional.interpolate(predict_imgs, size=(predict_imgs.shape[0], args.image_size, args.image_size, 3), mode='bilinearr')
-            predict_imgs = predict_imgs.reshape(bsz, seq_len, args.image_size, args.image_size, 3)
-            
-            # todo(demi): think about the scale factor design
-            if args.image_mouth == 0.0:
-                image_loss = torch.nn.MSELoss(reduction="none")(predict_imgs, imgs) / (args.image_size**2) / 3 * (model.outupt_dim)  # rescale to same value range
-
-                loss = (1-args.image_loss)*torch.sum(loss*loss_mask) + args.image_loss*torch.sum(image_loss*loss_mask)
-                loss = loss / torch.sum(loss_mask)
-            else:
-                raise NotImplementedError
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, aux_models, viz=True)
+        if n_iter % args.viz_every == 0:
+            visualize(args, viz_info, f"{args.viz_dir}/train_e{args.epoch}_i{n_iter}")
 
 
         # MSE Loss for now
         losses.append(loss.item())
+        latent_losses.append(viz_info["latent_loss"])
        
-        if n_iter % 100 == 0 and n_iter > 0 and args.mode == "debug":
+        if n_iter % 30 == 0 and n_iter > 0 and args.mode == "debug":
            print("loss avg=", np.mean(losses[-100:]))
+           print("latent loss avg=", np.mean(latent_losses[-100:]))
 
         loss.backward()
         opt.step()
@@ -91,6 +79,7 @@ def validate(args, data_loader, model, generator=None):
     total = len(data_loader)
 
     losses = []
+    latent_losses = []
     for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="validate"):
 
         bsz = src.size(0)
@@ -103,42 +92,22 @@ def validate(args, data_loader, model, generator=None):
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
         imgs = imgs.cuda()
+        imgs = imgs.type(torch.float32) / 255.  # convert to float
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
-        if args.mode == "debug":
-            predict_tgt = predict_tgt * 0
         assert predict_tgt.shape == tgt.shape
         assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
 
-        loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
-        loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
-        
-        if args.image_type == "none":
-            loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(dtype=loss.dtype)
-        else:
-            latents = predict_tgt.reshape(-1, 512, 18) 
-            predict_imgs, _ = generator([latents], input_is_latent=True, randomize_noise=False, return_latents=True) 
-            # predict_imgs: [3, H, W,], values in [-1, 1]
-            predict_imgs = predict_imgs.transpose(1, 3)
-            assert predict_imgs.shape[0] == bsz*seq_len and predict_imgs.shape[-1] == 3
-            predict_imgs = (predict_imgs+1)/2
-            # todo(demi): optionally, clamp to (0,1)
-            if predict_imgs.shape[1] != args.image_size:
-                predict_imgs =  torch.nn.functional.interpolate(predict_imgs, size=(predict_imgs.shape[0], args.image_size, args.image_size, 3), mode='bilinearr')
-            predict_imgs = predict_imgs.reshape(bsz, seq_len, args.image_size, args.image_size, 3)
-            
-            # todo(demi): think about the scale factor design
-            if args.image_mouth == 0.0:
-                image_loss = torch.nn.MSELoss(reduction="none")(predict_imgs, imgs) / (args.image_size**2) / 3 * (model.outupt_dim)  # rescale to same value range
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, aux_models, viz=True)
+        if n_iter % args.viz_every == 0:
+            visualize(args, viz_info, f"{args.viz_dir}/val_e{args.epoch}_i{n_iter}")
 
-                loss = (1-args.image_loss)*torch.sum(loss*loss_mask) + args.image_loss*torch.sum(image_loss*loss_mask)
-                loss = loss / torch.sum(loss_mask)
-            else:
-                raise NotImplementedError
 
         # MSE Loss for now
         losses.append(loss.item())
+        latent_losses.append(viz_info["latent_loss"])
 
+    print("validate latent_loss=", np.mean(latent_losses))
     return np.mean(losses)
  
 def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
@@ -171,7 +140,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     
     new_vecs_list = []
 
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="inference"):
         
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -237,11 +206,12 @@ if __name__ == "__main__":
     # image loss
     parser.add_argument("--image_type", type=str, default="none", help="[none, gt, gan]")
     parser.add_argument("--image_size", type=int, default=1024, help="must be squre, dataloader first resize image to image size")
-    parser.add_argument("--mouth_box", type=float, nargs="+", default=None)
+    parser.add_argument("--image_mouth", type=int, default=0, help="mouth loss or not ")  # currently only support all vs mouth only
 
     parser.add_argument("--img_loss", type=float, default=0.0)
-    parser.add_argument("--img_mouth_loss", type=float, default=0.0)
+    parser.add_argument("--mouth_box", type=int, nargs="+", default=None)
     parser.add_argument("--lmk_loss", type=float, default=0.0)
+    parser.add_argument("--perceptual_loss", type=float, default=0.0)
     
     # model
     parser.add_argument("--pca", type=str, default=None)
@@ -276,15 +246,20 @@ if __name__ == "__main__":
     parser.add_argument("--lr_patience", type=int, default=5)
     parser.add_argument("--wd", type=float, default=0)
 
+    # visualize
+    parser.add_argument("--viz_every", type=int, default=100)
+
     args = parser.parse_args()
-    
+
+    args.viz_dir = f"{args.output}/viz" 
+    os.makedirs(args.viz_dir, exist_ok=True)
+
     assert args.model in ["transformer", "mlp", "linear"]
     if args.model == "mlp":
         if args.seq_len != 1:
             print("warning: seq_len is forced to set to 1")
             args.seq_len = 1
 
-    
     # load pca
     if args.neutral_path is None:
         assert args.pca is None, "pca need to specify corresponding neutral path"
@@ -313,7 +288,56 @@ if __name__ == "__main__":
     if args.use_pose == 1:
         input_dim = input_dim + 6
 
-    
+    # load image-loss related models
+    aux_models = {}
+
+    if args.image_type != "none":
+        code_path = "A2LMapper/autoreg2"
+        # load stylegan2
+        stylegan2_path = "A2LMapper/autoreg2/checkpoints/e4e_ffhq_encode.pt"
+        net, opts = setup_model(stylegan2_path, "cuda")
+        generator = net.decoder
+        generator.eval()
+        aux_models["generator"] = generator
+        
+        # load landmark detector
+        if args.lmk_loss > 0.0:
+            raise NotImplementedError
+            """
+            # landmarks predictor network
+            hgnet_model_path = "A2LMapper/autoreg2/checkpoints/model_410400.pt"
+            hgnet_checkpoint = torch.load(hgnet_model_path)
+            if hgnet_checkpoint.get("model_type", "hgnet") == "hgnet":
+                hgnet = HGNet(INNER_NUM_LANDMARKS)
+            elif hgnet_checkpoint["model_type"] == "hgnet_tf":
+                hgnet = HGNet(INNER_NUM_LANDMARKS< conv=DsConvTF).cuda()
+            else:
+                raise NotImplementedError
+            hgnet.load_state_dict(hgnet_checkpoint["model_state_dict"])
+            hgnet.eval()
+            aux_models["hgnet"] = hgnet
+            
+            # face predictor network
+            ssd_label_path = f"{code_path}/HGNet-pytorch-master/SSD/models/mb2-ssd-lite-face-detector-210721.pth"
+            ssd_model_path = f"{code_path}/HGNet-pytorch-master/SSD/models/metaface-model-labels.txt"
+
+            class_names = [name.strip() for name in open(ssd_label_path).readlines()]
+            num_classes = len(class_names)
+            ssd = create_mobilev2_ssd_lite(len(class_names), is_test=True, device="cuda")
+            ssd.load(ssd_model_path)
+            predictor = create_mobilenetv2_ssd_lite_predictor(ssd, candidate_size=10, device="cuda")
+            aux_models["predictor"] = predictor
+            """
+
+        # load perceptual loss
+        if args.perceptual_loss > 0.0:
+            raise NotImplementedError
+
+    # preprocess dataset
+    if args.image_type != "none":
+        if args.img_loss > 0.0:
+            preprocess_images(args)
+
     # datasets
     print("loading datasets")
     train_dataset = Audio2FrameDataset(args, args.train_path, "train", sample="dense", input_dim=input_dim, output_dim=output_dim) 
@@ -364,37 +388,8 @@ if __name__ == "__main__":
     if args.load_ckpt is not None:
         print(f"loading checkpoint from  {args.load_ckpt}")
         model.load_state_dict(torch.load(f"{args.load_ckpt}")["model_state_dict"])
+    
 
-    # load stylegan2
-    if args.image_type != "none":
-        net, opts = setup_model("e4e_ffhq_encode.pt", "cuda")
-        generator = net.decoder
-        generator.eval()
-    else:
-        generator = None
-
-    # load landmark detector
-    if args.image_type != "none" and args.lmk_loss > 0.0:
-        # todo(demi): get hgnet model paths
-        hgnet_model_path = None
-
-        if hgnet_model_path.endswith('.pkl'):
-            hgnet = load_tf_vars(hgnet_model_path, device)
-        elif hgnet_model_path.endswith('.pt'):
-            checkpoint = torch.load(hgnet_model_path)
-            if "model_type" not in checkpoint or checkpoint["model_type"] == "hgnet":
-                hgnet = HGNet(INNER_NUM_LANDMARKS).to(device)
-            elif checkpoint["model_type"] == "hgnet_tf":
-                hgnet = HGNet(INNER_NUM_LANDMARKS, conv=DsConvTF).to(device)
-            else:
-                raise Exception(f"{checkpoint['model_type']} is not supported.")
-
-            hgnet.load_state_dict(checkpoint['model_state_dict'])
-            hgnet.eval()
-        else:
-            assert False
-    else:
-        hgnet = None
 
 
     # load optimizer
@@ -413,6 +408,8 @@ if __name__ == "__main__":
         optimizer._step = steps
         print("now learning rate=", optimizer.rate())
         #embed()
+
+
     # training and inference
     print("start training")
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)
@@ -422,10 +419,15 @@ if __name__ == "__main__":
     best_val = None
     last_val = None
     last_train = None
+
+    if args.mode == "debug":
+        args.epoch = -1
+        val_loss = validate(args, val_data_loader, model, aux_models)
     for epoch in range(args.epochs):
-        train_loss = train(args, train_data_loader, model, optimizer, generator=generator)
+        args.epoch = epoch
+        train_loss = train(args, train_data_loader, model, optimizer, aux_models)
         print(f"EPOCH[{epoch}] | Train Loss : {train_loss:.3f}")
-        val_loss = validate(args, val_data_loader, model, generator=generator)
+        val_loss = validate(args, val_data_loader, model, aux_models)
         print(f"EPOCH[{epoch}] | Val Loss : {val_loss:.3f}")
 
         if args.optim == "adam":
