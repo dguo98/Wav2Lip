@@ -10,6 +10,8 @@ def convert_image(img):
     img = (img*255).astype(np.uint8)
     return Image.fromarray(img)
 
+def images_to_lmks(args, hgnet, images):
+    raise NotImplementedError
 
 def get_loss(args, predict_tgt, tgt, src_mask, imgs, aux_models, viz=False):
     bsz, seq_len, latent_dim = tgt.shape
@@ -20,7 +22,7 @@ def get_loss(args, predict_tgt, tgt, src_mask, imgs, aux_models, viz=False):
     latent_loss = torch.sum(latent_loss * loss_mask) / torch.sum(loss_mask)  # average across bsz, seq_len, sum over latent dims
 
     # NB(demi): revisit scaling regime
-    img_loss = 0
+    image_loss = 0
     lmk_loss = 0
     perceptual_loss = 0
     viz_info = {}

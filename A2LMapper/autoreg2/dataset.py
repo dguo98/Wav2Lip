@@ -5,6 +5,7 @@ import numpy as np
 from glob import glob
 from tqdm import tqdm
 from PIL import Image
+from IPython import embed
 
 class Audio2FrameDataset(object):
     def __init__(self, args, path, split, load_img=False, split_ratio=0.9, input_dim=512, output_dim=512*18, sample="dense"):
@@ -32,23 +33,40 @@ class Audio2FrameDataset(object):
             self.data_folders = [path]
         
         if args.mode == "debug":
-            self.data_folders = self.data_folders[:1]
+            #self.data_folders = self.data_folders[:1]
+            pass 
         
         # cache
         self.counts = []
         self.audio_vecs_list = []
         self.latent_vecs_list = []
         self.pose_vecs_list = []
-        self.images = []  # if args.img_loss > 0.0, then: it's entire image if args.image_mouth < 1.0, else only mouth image
+        self.cache_images = None
+        #self.images = []  # if args.img_loss > 0.0, then: it's entire image if args.image_mouth < 1.0, else only mouth image
 
         if args.mouth_box is not None:
             x1, y1, x2, y2 = args.mouth_box
+        
+        if args.mode == "debug":
+            #self.data_folders = self.data_folders[:1]
+            pass
+        
+        self.sample_orders = []
+        if self.split == "train":
+            self.sample_folders = np.random.permutation(len(self.data_folders))
+        else:
+            self.sample_folders = np.arange(len(self.data_folders))
 
         for folder in tqdm(self.data_folders, desc=f"loading {split} dataset vectors"):
             self.counts.append(self.get_interval_count(folder))
+            if split in ["train"]:
+                self.sample_orders.append(np.random.permutation(self.counts[-1]) )
+            else:
+                self.sample_orders.append(np.arange(self.counts[-1]))
             self.audio_vecs_list.append(np.load(f"{folder}/wav2lip.npy"))
             
             # load images
+            """
             if self.image_type != "none":
 
                 # load images
@@ -56,9 +74,9 @@ class Audio2FrameDataset(object):
                     folder_images = np.load(f"{folder}/{args.image_type}_images_r{args.image_size}.npy")
                     if args.image_mouth == 1:
                         folder_images = folder_images[:, x1:x2, y1:y2]  # only need mouth to save memory
-                    assert folder_images.shape[0] == len(self.audio_vecs_lsit[-1]), f"# of images not matched in path {folder}"
+                    assert folder_images.shape[0] == len(self.audio_vecs_list[-1]), f"# of images not matched in path {folder}"
                     self.images.append(folder_images)
-
+            """
             
             if self.latent_type == "w+":
                 self.latent_vecs_list.append(np.load(f"{folder}/frame.npy").reshape(-1,18*512))  # NB(demi): even test needs to have frame.npy for now
@@ -76,6 +94,14 @@ class Audio2FrameDataset(object):
         self.mode = args.mode
         assert load_img is False, "loading image not supported yet"
     
+    def new_samples(self):
+        if self.split in ["val", "test"]:
+            return
+        for i in range(len(self.sample_orders)):
+            self.sample_orders[i] = np.random.permutation(self.counts[i])
+
+        self.sample_folders = np.random.permutation(len(self.data_folders))
+
 
     def get_interval_count(self, folder):
         audio_vec = np.load(f"{folder}/wav2lip.npy")
@@ -95,8 +121,20 @@ class Audio2FrameDataset(object):
         audio_vecs = self.audio_vecs_list[folder_id]
         latent_vecs = self.latent_vecs_list[folder_id]
         pose_vecs = self.pose_vecs_list[folder_id]
+
         if self.image_type != "none":
-            image_vecs = self.images[folder_id]
+            if idx == 0:
+                self.cache_images = np.load(f"{folder}/{self.args.image_type}_images_r{self.args.image_size}.npy")
+            image_vecs = self.cache_images
+            if self.args.image_mouth == 1:
+                x1, y1, x2, y2 = self.args.mouth_box
+                image_vecs = image_vecs[:, x1:x2, y1:y2]
+
+
+            assert image_vecs.shape[0] == latent_vecs.shape[0]
+            
+        idx = self.sample_orders[folder_id][idx]
+        
         
         folder_len = len(audio_vecs)
 
@@ -130,6 +168,8 @@ class Audio2FrameDataset(object):
         tgt_mask = np.ones(src.shape[0])
 
         if idx + self.seq_len > folder_len:  
+            if self.seq_len == 1:
+                embed()
             assert self.seq_len != 1
             idxs = np.arange(idx, idx+self.seq_len)
             new_len = idx + self.seq_len - folder_len
@@ -144,7 +184,7 @@ class Audio2FrameDataset(object):
             src_mask = np.concatenate([src_mask, np.zeros(new_len,dtype=src_mask.dtype)],axis=0)
             tgt_mask = np.concatenate([tgt_mask, np.zeros(new_len, dtype=tgt_mask.dtype)],axis=0)
             if self.image_type != "none":
-                imgs = np.concatenate([imgs, np.zeros((new_len,self.image_size,self.image_size,3),dtype=imgs.dtype)],axis=0)
+                imgs = np.concatenate([imgs, np.zeros((new_len,imgs.shape[1],imgs.shape[2],3),dtype=imgs.dtype)],axis=0)
 
         src_mask = src_mask.reshape(1, self.seq_len)
         tgt_mask = tgt_mask.reshape(1, self.seq_len).repeat(self.seq_len, axis=0)
@@ -173,10 +213,12 @@ class Audio2FrameDataset(object):
     def __getitem__(self, idx):
         
         for i in range(len(self.counts)):
-            if idx < self.counts[i]:
-                return self.get_interval_i(i, idx)
+            f = self.sample_folders[i]
+
+            if idx < self.counts[f]:
+                return self.get_interval_i(f, idx)
             else:
-                idx = idx - self.counts[i]
+                idx = idx - self.counts[f]
 
         assert False  # must found idx
                 

@@ -36,13 +36,16 @@ def train(args, data_loader, model, opt, aux_models):
     losses = []
     latent_losses = []
     for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="train"):
-
+        
         opt.zero_grad()
 
         bsz = src.size(0)
         seq_len = src.size(1)
         assert src.shape == (bsz, seq_len, model.input_dim)
         
+        if n_iter == 0:
+            print("train first iters ids=", ids)
+
         src = src.cuda()
         prev_tgt = prev_tgt.cuda()
         tgt = tgt.cuda()
@@ -349,8 +352,15 @@ if __name__ == "__main__":
         val_dataset.data_len=100
         test_dataset.data_len=50
 
+    if args.mode == "slow":
+        train_dataset.data_len = train_dataset.data_len // 4
+        val_dataset.data_len = val_dataset.data_len // 4
+        test_dataset.data_len = test_dataset.data_len // 4
+ 
+   
+    # NB(demi): shuffle train dataset
     train_data_loader = data_utils.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
+        train_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers)
     val_data_loader = data_utils.DataLoader(
         val_dataset, batch_size=args.batch_size,
@@ -422,7 +432,7 @@ if __name__ == "__main__":
 
     if args.mode == "debug":
         args.epoch = -1
-        val_loss = validate(args, val_data_loader, model, aux_models)
+        #val_loss = validate(args, val_data_loader, model, aux_models)
     for epoch in range(args.epochs):
         args.epoch = epoch
         train_loss = train(args, train_data_loader, model, optimizer, aux_models)
@@ -444,23 +454,25 @@ if __name__ == "__main__":
         last_val = val_loss 
         last_train = train_loss
 
+        train_dataset.new_samples()  # shuffle
+
     torch.save({"model_state_dict": model.state_dict()}, f"{args.output}/last_checkpoint.pt")
     model.load_state_dict(torch.load(f"{args.output}/best_val_checkpoint.pt")["model_state_dict"])
 
 
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)  # now, train and test has to be the same face
-       
-    val_loss = validate(args, val_data_loader, model)
-    test_loss = validate(args, test_data_loader, model)
-    print("load model val loss=", val_loss)
-    print("load model test loss=", test_loss)
+    
+    if args.mode != "slow":
+        val_loss = validate(args, val_data_loader, model)
+        test_loss = validate(args, test_data_loader, model)
+        print("load model val loss=", val_loss)
+        print("load model test loss=", test_loss)
 
-
-    infer_dir = f"{args.output}/tf_inference"
-    if not os.path.exists(infer_dir):
-        os.makedirs(infer_dir)
-    os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
+        infer_dir = f"{args.output}/tf_inference"
+        if not os.path.exists(infer_dir):
+            os.makedirs(infer_dir)
+        os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
+        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
 
     infer_dir = f"{args.output}/inference"
     if not os.path.exists(infer_dir):
