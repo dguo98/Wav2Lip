@@ -1,11 +1,13 @@
 import matplotlib
 
+import os,sys
 matplotlib.use('Agg')
 import torch
 from torch import nn
-from models.encoders import psp_encoders
-from models.stylegan2.model import Generator
-from configs.paths_config import model_paths
+sys.path.append("..")
+from stylegan2_models.encoders import psp_encoders
+from stylegan2_models.stylegan2.model import Generator
+from stylegan2_configs.paths_config import model_paths
 
 
 def get_keys(d, name):

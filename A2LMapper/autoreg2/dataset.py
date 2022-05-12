@@ -33,7 +33,8 @@ class Audio2FrameDataset(object):
         
         if args.mode == "debug":
             self.data_folders = self.data_folders[:1]
-
+        
+        # cache
         self.counts = []
         self.audio_vecs_list = []
         self.latent_vecs_list = []
@@ -42,8 +43,6 @@ class Audio2FrameDataset(object):
 
         if args.mouth_box is not None:
             x1, y1, x2, y2 = args.mouth_box
-            print("mouth_box=", args.mouth_box)
-            print("x1=",x1, " y1=", y1, "x2=", x2, "y2=", y2)
 
         for folder in tqdm(self.data_folders, desc=f"loading {split} dataset vectors"):
             self.counts.append(self.get_interval_count(folder))
@@ -54,11 +53,11 @@ class Audio2FrameDataset(object):
 
                 # load images
                 if args.img_loss > 0.0:
-                    folder_images = np.load(f"{folder}/{args.image_type}_images.npy")
-                    if args.image_mouth == 1.0:
+                    folder_images = np.load(f"{folder}/{args.image_type}_images_r{args.image_size}.npy")
+                    if args.image_mouth == 1:
                         folder_images = folder_images[:, x1:x2, y1:y2]  # only need mouth to save memory
+                    assert folder_images.shape[0] == len(self.audio_vecs_lsit[-1]), f"# of images not matched in path {folder}"
                     self.images.append(folder_images)
-
 
             
             if self.latent_type == "w+":
