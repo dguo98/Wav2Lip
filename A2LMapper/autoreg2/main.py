@@ -140,6 +140,10 @@ def validate(args, data_loader, model, generator=None):
         assert src.shape == (bsz, seq_len, model.input_dim)
 
         if args.sync_loss > 0.0:  # HACK(demi): reshape back, syncnet_T=5
+
+            if bsz == 1:  # HACK(demi): drop, otherwise syncnet will raise errors
+                print("continue validate")
+                continue
             assert seq_len == 5
             src = src.reshape(bsz*5, 1, model.input_dim)
             prev_tgt = prev_tgt.reshape(bsz*5, 1, model.output_dim)
@@ -179,7 +183,7 @@ def validate(args, data_loader, model, generator=None):
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
         assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
-
+        
         loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, mels, aux_models, viz=True)
 
         if n_iter % args.viz_every == 0:
@@ -541,6 +545,8 @@ if __name__ == "__main__":
     best_val = None
     last_val = None
     last_train = None
+    train_loss = 0
+    val_loss = 0
 
     for epoch in range(args.epochs):
         args.cur_epoch = epoch
