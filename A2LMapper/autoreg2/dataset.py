@@ -24,6 +24,14 @@ class Audio2FrameDataset(object):
         self.input_dim=input_dim
         self.output_dim=output_dim
         
+        # HACK(demi): enforce consecutvie frames are together
+        if args.sync_loss > 0.0 and split in ["train", "val"]:
+            syncnet_T = 5
+            assert args.seq_len == 1, "for sync loss, we only support seq_len=1"
+            self.seq_len = self.seq_len * syncnet_T  
+            
+         
+        
         # get data folders
         if split in ["train", "val"]:
             self.data_folders = glob(f"{path}/{split}/*")
@@ -42,6 +50,7 @@ class Audio2FrameDataset(object):
         self.latent_vecs_list = []
         self.pose_vecs_list = []
         self.lmk_vecs_list = []
+        self.mel_vecs_list = []
         self.cache_images = None
 
         #self.images = []  # if args.img_loss > 0.0, then: it's entire image if args.image_mouth < 1.0, else only mouth image
@@ -71,16 +80,9 @@ class Audio2FrameDataset(object):
             if self.image_type != "none":
                 if args.lmk_loss > 0.0:
                     self.lmk_vecs_list.append(np.load(f"{folder}/{args.image_type}_lmks_r{args.image_size}.npy"))
-                """
-                # load images
-                if args.img_loss > 0.0:
-                    folder_images = np.load(f"{folder}/{args.image_type}_images_r{args.image_size}.npy")
-                    if args.image_mouth == 1:
-                        folder_images = folder_images[:, x1:x2, y1:y2]  # only need mouth to save memory
-                    assert folder_images.shape[0] == len(self.audio_vecs_list[-1]), f"# of images not matched in path {folder}"
-                    self.images.append(folder_images)
-                """
-            
+                if args.sync_loss > 0.0:
+                    self.mel_vecs_list.append(np.load(f"{folder}/wav2lip_mels.npy"))
+
             if self.latent_type == "w+":
                 self.latent_vecs_list.append(np.load(f"{folder}/frame.npy").reshape(-1,18*512))  # NB(demi): even test needs to have frame.npy for now
             elif self.latent_type == "stylespace":
@@ -145,9 +147,15 @@ class Audio2FrameDataset(object):
                 lmk_vecs = self.lmk_vecs_list[folder_id]
             else:
                 lmk_vecs = None
+
+            if self.args.sync_loss > 0.0:
+                mel_vecs = self.mel_vecs_list[folder_id]
+            else:
+                mel_vecs = None
         else:
             image_vecs = None
             lmk_vecs = None
+            mel_vecs = None
 
 
             
@@ -167,6 +175,8 @@ class Audio2FrameDataset(object):
             imgs = image_vecs[idx: r_idx]
         if lmk_vecs is not None:
             lmks = lmk_vecs[idx: r_idx]
+        if mel_vecs is not None:
+            mels = mel_vecs[idx: r_idx]
 
         if self.use_pose:
             src = np.concatenate([src, pose_vecs[idx:r_idx]], axis=1)
@@ -208,6 +218,8 @@ class Audio2FrameDataset(object):
                 imgs = np.concatenate([imgs, np.zeros((new_len,imgs.shape[1],imgs.shape[2],3),dtype=imgs.dtype)],axis=0)
             if lmk_vecs is not None:
                 lmks = np.concatenate([lmks, np.zeros((new_len, lmks.shape[1], lmks.shape[2]),dtype=lmks.dtype)],axis=0)
+            if mel_vecs is not None:  # [seq_len, 80, 16]
+                mels = np.concatenate([mels, np.zeros((new_len, mels.shape[1], mels.shape[2]), dtype=mels.dtype)],axis=0)
 
         src_mask = src_mask.reshape(1, self.seq_len)
         tgt_mask = tgt_mask.reshape(1, self.seq_len).repeat(self.seq_len, axis=0)
@@ -226,8 +238,10 @@ class Audio2FrameDataset(object):
             imgs = idxs  # hack
         if lmk_vecs is None:
             lmks = idxs  # hack
+        if mel_vecs is None:
+            mels = idxs  # hack
         
-        return idxs, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks
+        return idxs, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels
 
     def get_neutral(self):
         return self.args.neutral_vec

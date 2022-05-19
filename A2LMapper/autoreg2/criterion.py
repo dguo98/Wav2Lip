@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import numpy as np
 import os
 import sys
@@ -12,6 +13,24 @@ from HGNet.networks import HGNet, FaceScoreNet, heatmap_to_landmarks, compute_xy
 from HGNet.common.global_constants import *
 from HGNet.convert_weights import DsConvTF, load_tf_vars, ConvTF
 from HGNet.common.auxiliary_ftns import box_from_landmarks
+
+logloss = nn.BCELoss()
+syncnet_T = 5
+
+def cosine_loss(a, v, y):
+    d = nn.functional.cosine_similarity(a, v)
+    loss = logloss(d.unsqueeze(1), y)
+    return loss
+
+def get_sync_loss(syncnet, mel, g):
+    g = g[:, :, :, g.size(3)//2:]
+    g = torch.cat([g[:, :, i] for i in range(syncnet_T)], dim=1)
+    # B, 3 * T, H//2, W
+    a, v = syncnet(mel, g)
+    y = torch.ones(g.size(0), 1).float().cuda()
+    loss = cosine_loss(a, v, y)
+    return loss
+
 
 def convert_image(img):
     img = np.clip(img, 0, 1)
@@ -47,7 +66,7 @@ def images_to_lmks(args, hgnet, xycoords, images):
    
     return torch_pred_ldmk
 
-def get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=False):
+def get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, mels, aux_models, viz=False):
     bsz, seq_len, latent_dim = tgt.shape
     neutral_vec = torch.from_numpy(args.neutral_vec).cuda().reshape(-1, 18, 512)  # now, train and test has to be the same face
 
@@ -59,6 +78,7 @@ def get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=False
     image_loss = 0
     lmk_loss = 0
     perceptual_loss = 0
+    sync_loss = 0
     viz_info = {}
 
     if args.image_type != "none":
@@ -112,6 +132,26 @@ def get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=False
             perceptual_loss = aux_models["lpips_loss"](inverse_tensor2im(args, predict_imgs[bool_mask]), inverse_tensor2im(args, imgs[bool_mask]))  # average across bsz, seq_len on valid mask
             perceptual_loss = perceptual_loss * 100  # rescale, magic number
             viz_info["perceptual_loss"] = perceptual_loss.item()
+        
+        if args.sync_loss > 0.0:
+            # first resize to [96, 96]
+            sync_imgs = predict_imgs.reshape(bsz*seq_len, args.image_size,args.image_size,3).permute((0,3,1,2))
+            sync_imgs =  torch.nn.functional.interpolate(sync_imgs, size=(96,96), mode='bilinear')
+            # predict_imgs: [bsz*seq_len, 3, H, W] 
+            assert sync_imgs.shape == (bsz*seq_len, 3, 96,96)
+            assert bsz % 5 == 0 and seq_len == 1  # NB(demi): current assumption
+
+            sync_imgs = sync_imgs.reshape(bsz//5, 5, 3, 96, 96)
+            sync_imgs = sync_imgs.permute((0, 2, 1, 3, 4))
+            assert sync_imgs.shape[1] == 3 and sync_imgs.shape[2] == 5
+            sync_imgs = sync_imgs[:, [2,1,0], :, :, :]  # reverse RGB
+            sync_mels = mels.reshape(bsz //5, 5, 80, 16)[:, 2:3]
+            sync_loss = get_sync_loss(aux_models["syncnet"], sync_mels, sync_imgs) * 10  # rescale, magic number
+
+            # todo(demi): rescale
+
+            viz_info["sync_loss"] = sync_loss.item()
+
 
         if args.img_loss > 0.0:
             if args.image_mouth == 1:
@@ -148,8 +188,9 @@ def get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=False
 
     viz_info["latent_loss"] = latent_loss.item()
 
-    loss = (1-args.img_loss-args.lmk_loss-args.perceptual_loss) * latent_loss + \
+    loss = (1-args.img_loss-args.lmk_loss-args.perceptual_loss-args.sync_loss) * latent_loss + \
         args.img_loss * image_loss + \
         args.lmk_loss * lmk_loss + \
+        args.sync_loss * sync_loss + \
         args.perceptual_loss * perceptual_loss
     return loss, viz_info

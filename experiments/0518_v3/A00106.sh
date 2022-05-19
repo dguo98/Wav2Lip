@@ -1,16 +1,16 @@
 #!/bin/bash
 
-EXP_ID=A00093
+EXP_ID=A00106
 BASE_DIR=/sailhome/demiguo/demiguo/research/Wav2Lip
 LOG_DIR=/jagupard29/scr0/demiguo/${EXP_ID}
 
-TRAIN_DATA=${BASE_DIR}/data/timit/videos
-TEST_DATA=${BASE_DIR}/data/timit/videos/test/s3
+TRAIN_DATA=/u/nlp/data/timit_videos_v2/videos
+TEST_DATA=/u/nlp/data/timit_videos_v2/videos/test/s3
 
 GPU=0
-BS=8
+BS=2
 WARMUP=4000
-EPOCHS=5
+EPOCHS=1
 H=2
 D_MODEL=512
 D_FF=512
@@ -19,13 +19,14 @@ N=5
 SEQ_LEN=1
 USE_POSE=0
 IMG_TYPE=gt
-IMG_LOSS=0.600
+IMG_LOSS=0.000
 IMG_SIZE=256
-MODE=default
-CKPT=logs/A00026/best_val_checkpoint.pt
+MODE=slow2
+CKPT=logs/A00095/best_val_checkpoint.pt
 IMG_MOUTH=1
 LMK_LOSS=0.000
 PERC_LOSS=0.000
+SYNC_LOSS=1.0
 
 cd ${BASE_DIR}
 mkdir -p ${LOG_DIR}
@@ -33,10 +34,10 @@ CUDA_VISIBLE_DEVICES=${GPU} python A2LMapper/autoreg2/main.py --train_path ${TRA
     --batch_size ${BS} --warmup ${WARMUP} --seq_len ${SEQ_LEN} --dropout ${DP} \
     --N ${N} --d_ff ${D_FF} --d_model ${D_MODEL} --h ${H} --use_pose ${USE_POSE} \
     --image_type ${IMG_TYPE} --img_loss ${IMG_LOSS} --image_size ${IMG_SIZE} --mode ${MODE} \
-    --lmk_loss ${LMK_LOSS} --perceptual_loss ${PERC_LOSS} \
-    --viz_every 200 \
+    --lmk_loss ${LMK_LOSS} --perceptual_loss ${PERC_LOSS} --sync_loss ${SYNC_LOSS} \
+    --viz_every 200 --load_ckpt ${CKPT} \
     --image_mouth ${IMG_MOUTH} --mouth_box 175 80 215 176 \
-    --model transformer --optim noam --epochs ${EPOCHS} 1> ${LOG_DIR}/log.out 2>${LOG_DIR}/log.err
+    --model transformer --optim noam --epochs ${EPOCHS} #1> ${LOG_DIR}/log.out 2>${LOG_DIR}/log.err
 
 cd ../talking-head-stylegan
 
@@ -46,13 +47,13 @@ rm ${LOG_DIR}/inference/*.jpg
 cp ${LOG_DIR}/inference/predict_with_audio.mp4 ${LOG_DIR}/test.mp4
 
 cd ../Wav2Lip
-TEST_DATA=${BASE_DIR}/data/timit/videos/train/s0
+TEST_DATA=/u/nlp/data/timit_videos_v2/videos/train/s0
 CUDA_VISIBLE_DEVICES=${GPU} python A2LMapper/autoreg2/inference.py --train_path ${TRAIN_DATA} --test_path ${TEST_DATA} --output ${LOG_DIR} \
     --batch_size ${BS} --warmup ${WARMUP} --seq_len ${SEQ_LEN} --dropout ${DP} \
     --N ${N} --d_ff ${D_FF} --d_model ${D_MODEL} --h ${H} --use_pose ${USE_POSE} \
     --image_type ${IMG_TYPE} --img_loss ${IMG_LOSS} --image_size ${IMG_SIZE} --mode ${MODE} \
     --lmk_loss ${LMK_LOSS} --perceptual_loss ${PERC_LOSS} \
-    --load_ckpt ${CKPT} --viz_every 200 \
+    --viz_every 2000 \
     --image_mouth ${IMG_MOUTH} --mouth_box 175 80 215 176 \
     --model transformer --optim noam --epochs ${EPOCHS} 1> ${LOG_DIR}/log_inf.out 2>${LOG_DIR}/log_inf.err
 

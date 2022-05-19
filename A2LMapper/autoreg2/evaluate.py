@@ -35,95 +35,9 @@ from wav2lip_models import SyncNet_color as SyncNet
 # preprocessing
 from preprocess import preprocess_images, preprocess_lmks
 
-def train(args, data_loader, model, opt, aux_models):
-    model.train()
+ 
 
-    total = len(data_loader)
-
-    losses = []
-    latent_losses = []
-    perc_losses = []
-    img_losses = []
-    sync_losses = []
-    
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="train"):
-        
-        opt.zero_grad()
-        
-        bsz = src.size(0)
-        seq_len = src.size(1)
-        assert src.shape == (bsz, seq_len, model.input_dim)
-
-        if args.sync_loss > 0.0:  # HACK(demi): reshape back, syncnet_T=5
-            assert seq_len == 5
-            src = src.reshape(bsz*5, 1, model.input_dim)
-            prev_tgt = prev_tgt.reshape(bsz*5, 1, model.output_dim)
-            tgt = tgt.reshape(bsz*5, 1, model.output_dim)
-            
-            # HACK(demi): since seq_len=1, mask should be all 1s
-            if torch.sum(src_mask).item() != np.prod(src_mask.shape):
-                continue
-            assert torch.sum(src_mask).item() == np.prod(src_mask.shape)
-            assert torch.sum(tgt_mask[:,:1,:1]).item() == np.prod(tgt_mask[:,:1,:1].shape)
-            assert src_mask.shape == (bsz, 1, 5) and tgt_mask.shape == (bsz, 5, 5)
-            src_mask = torch.ones(bsz*5, 1, 1).type(src_mask.dtype)
-            tgt_mask = torch.ones(bsz*5, 1, 1).type(tgt_mask.dtype)
-            
-            if imgs.shape == (bsz, seq_len):
-                imgs = imgs.reshape(bsz*5, 1)
-            else:
-                assert imgs.shape == (bsz, seq_len, args.image_size, args.image_size, 3)
-                imgs = imgs.reshape(bsz*5, 1, args.image_size, args.image_size, 3)
-            if lmks.shape == (bsz, seq_len):
-                lmks = lmks.reshape(bsz*5, 1)
-            else:
-                lmks = lmks.reshape(bsz*5, 1, lmks.shape[2], lmks.shape[3])
-            mels = mels.reshape(bsz*5, 1, 80, 16)
-
-            bsz = src.shape[0]
-            seq_len = 1  # HACK(demi): enforced for sync loss
-       
-        src = src.cuda()
-        prev_tgt = prev_tgt.cuda()
-        tgt = tgt.cuda()
-        src_mask = src_mask.cuda()
-        tgt_mask = tgt_mask.cuda()
-        imgs = imgs.cuda()
-        imgs = imgs.type(torch.float32) / 255.  # convert to float
-        lmks = lmks.cuda()
-        mels = mels.cuda()
-        
-        predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
-        assert predict_tgt.shape == tgt.shape
-        assert args.seq_len > 0
-        
-        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, mels, aux_models, viz=True)
-
-        if n_iter % args.viz_every == 0:
-            visualize(args, viz_info, f"{args.viz_dir}/train_e{args.cur_epoch}_i{n_iter}")
-
-        # MSE Loss for now
-        losses.append(loss.item())
-        latent_losses.append(viz_info["latent_loss"])
-        perc_losses.append(viz_info.get("perceptual_loss", 0))
-        img_losses.append(viz_info.get("image_loss", 0))
-        sync_losses.append(viz_info.get("sync_loss", 0))
-        if n_iter % args.log_every == 0 and n_iter >= 200:
-            metrics_dict = {"loss": np.mean(losses[-200:]),
-                "latent_loss": np.mean(latent_losses[-200:]),
-                "perc_loss": np.mean(perc_losses[-200:]),
-                "img_loss": np.mean(img_losses[-200:]),
-                "sync_loss": np.mean(sync_losses[-200:])}
-            log_metrics(args, args.cur_epoch, n_iter, "train", metrics_dict , f"{args.output}/metrics.json")
-
-       
-        loss.backward()
-
-        opt.step()
-    return np.mean(losses)
-        
-
-def validate(args, data_loader, model, generator=None):
+def validate(args, data_loader, model, generator=None, save_path=None):
     model.eval()
 
     total = len(data_loader)
@@ -133,6 +47,8 @@ def validate(args, data_loader, model, generator=None):
     perc_losses = []
     img_losses = []
     sync_losses = []
+    lmk_losses = []
+
     for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="validate"):
 
         bsz = src.size(0)
@@ -146,6 +62,10 @@ def validate(args, data_loader, model, generator=None):
             tgt = tgt.reshape(bsz*5, 1, model.output_dim)
             
             # HACK(demi): since seq_len=1, mask should be all 1s
+            if torch.sum(src_mask).item() != np.prod(src_mask.shape):  # last frames
+                # HACK(demi): continue for now
+                print("drop n<5 frames, continue")
+                continue 
             assert torch.sum(src_mask).item() == np.prod(src_mask.shape)
             assert torch.sum(tgt_mask[:,:1,:1]).item() == np.prod(tgt_mask[:,:1,:1].shape)
             assert src_mask.shape == (bsz, 1, 5) and tgt_mask.shape == (bsz, 5, 5)
@@ -182,57 +102,56 @@ def validate(args, data_loader, model, generator=None):
 
         loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, mels, aux_models, viz=True)
 
-        if n_iter % args.viz_every == 0:
-            visualize(args, viz_info, f"{args.viz_dir}/train_e{args.cur_epoch}_i{n_iter}")
-
-        # MSE Loss for now
         losses.append(loss.item())
         latent_losses.append(viz_info["latent_loss"])
         perc_losses.append(viz_info.get("perceptual_loss", 0))
         img_losses.append(viz_info.get("image_loss", 0))
         sync_losses.append(viz_info.get("sync_loss", 0))
-        if n_iter % args.log_every == 0 and n_iter >= 200:
-            metrics_dict = {"loss": np.mean(losses[-200:]),
-                "latent_loss": np.mean(latent_losses[-200:]),
-                "perc_loss": np.mean(perc_losses[-200:]),
-                "img_loss": np.mean(img_losses[-200:]),
-                "sync_loss": np.mean(sync_losses[-200:])}
-            log_metrics(args, args.cur_epoch, n_iter, "val", metrics_dict , f"{args.output}/metrics.json")
+        lmk_losses.append(viz_info.get("lmk_loss",0))
 
-
-    return np.mean(losses)
- 
-def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
-    assert mode in ["autoreg", "tf"]
-    model.eval()
-
-    total = len(data_loader)
-    neutral_vec = neutral_vec.reshape(1, -1).type(torch.float32)
-
-    losses = []
     
-    output_dim = model.output_dim
-    org_output_dim = model.org_output_dim
+    eval_dict = {"type": "scaled",
+        "loss": np.mean(losses),
+        "latent_loss": np.mean(latent_losses),  # scaled 512*18
+        "perc_loss": np.mean(perc_losses),   # scaled 100
+        "img_loss": np.mean(img_losses),  # scaled 512*18
+        "sync_loss": np.mean(sync_losses),
+        "lmk_loss": np.mean(lmk_losses) }  # scaled 10
+    
+    with open(save_path, "w") as f:
+        json.dump(eval_dict, f)
+ 
 
+def inference(args, input_dim, output_dim, neutral_vec, model, mode="autoreg", save_path=None):
+    assert mode in ["autoreg", "tf"]
+    assert args.pca is None  # deprecated, to simplify code
+    model.eval()
+    neutral_vec = neutral_vec.reshape(1, -1).type(torch.float32)
+    losses = []
+    #output_dim = model.output_dim
+    #org_output_dim = model.org_output_dim
     cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
-    if args.pca is not None:  
-        # quite hacky now -- in theory we can rewrite pca on torch
-        cur_vec = torch.zeros_like(neutral_vec).cpu().numpy().reshape(1, org_output_dim)
-        cur_vec = args.pca.transform(cur_vec)[:, args.pca_dims]
-        cur_vec = torch.from_numpy(cur_vec).cuda()
-         
-        
     
     counter = 0
-    # todo(demi): support rolling/overlapping source context
+    new_vecs_list = []
 
     def subsequent_mask(size):
         mask = 1-np.triu(np.ones((1,size,size)),k=1)
         return torch.from_numpy(mask).cuda()
-    
-    new_vecs_list = []
 
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+    # NB(demi): first generate all predictions
+    original_seq_len = args.seq_len
+    
+    args.seq_len = original_seq_len
+    test_dataset = Audio2FrameDataset(args, args.test_path, "test", sample="sparse", input_dim=input_dim, output_dim=output_dim)
+    data_loader = data_utils.DataLoader(
+        test_dataset, batch_size=1,
+        num_workers=args.num_workers,
+        shuffle=False)  # HACK(demi): use batch size = seq len
+    
+    predict_tgts = []
+    total=len(data_loader)
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="inference: get predictions"):
         
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -245,41 +164,104 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
         tgt_mask = tgt_mask.cuda()  # not actually used
         
         memory = model.encode(src, src_mask)
-        prev_tgt = cur_vec.reshape(1, 1, output_dim)
+        prev_tgt = cur_vec.reshape(1, 1, model.output_dim)
         for i in range(seq_len):
             tgt_mask = subsequent_mask(prev_tgt.size(1))
             out = model.decode(memory, src_mask, prev_tgt, tgt_mask, gen=False)
             assert out.shape[:2] == (bsz, prev_tgt.size(1))
             predict_tgt = model.generate(out[:, -1])
             
-            if args.pca is not None:
-                vecs = predict_tgt.detach().cpu().numpy().reshape(1,output_dim)
-                new_vecs = np.repeat(args.pca_neutral_vec, len(vecs), axis=0)
-                new_vecs[:, args.pca_dims] = vecs
-                new_vecs = args.pca.inverse_transform(new_vecs)
-                new_vecs = new_vecs + args.neutral_vec
-                new_vecs_list.append(new_vecs.reshape(-1))
-                new_vecs = torch.from_numpy(new_vecs).reshape(-1)
-                torch.save(new_vecs, f"{infer_dir}/predict_{counter:06d}.pt")
-            else:
-                new_vecs_list.append((predict_tgt+neutral_vec).reshape(-1).detach().cpu().numpy())
-                torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
+            predict_tgts.append(predict_tgt.detach().cpu().numpy())
             counter += 1
             
             if mode == "tf":
                 predict_tgt = tgt[0, i]  # teacher forcing
-            prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
+            prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,model.output_dim)], dim=1)
             cur_vec = predict_tgt
-            assert prev_tgt.shape == (bsz, i+2, output_dim)
+            assert prev_tgt.shape == (bsz, i+2, model.output_dim)
     
-    final_vecs = np.stack(new_vecs_list, axis=0)
-    if args.latent_type == "stylespace":
-        np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
-        os.system(f"rm {infer_dir}/predict_*.pt")
-    #assert final_vecs.shape == (len(data_loader), org_output_dim)
-    return 
+    predict_tgts = np.stack(predict_tgts, axis=0)
 
 
+    # now evaluate loss
+    args.seq_len = 1
+    test_dataset = Audio2FrameDataset(args, args.test_path, "test", sample="sparse", input_dim=input_dim, output_dim=output_dim)
+    # NB(demi): batch size = 5, each batch for sync loss
+    data_loader = data_utils.DataLoader(
+        test_dataset, batch_size=10,
+        num_workers=args.num_workers,
+        shuffle=False)     # each k
+
+    counter = 0
+    losses = []
+    latent_losses = []
+    perc_losses = []
+    img_losses = []
+    sync_losses = []
+    lmk_losses = []
+    total=len(data_loader)
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="inference: get losses"):
+        
+        bsz = src.size(0)
+        seq_len = src.size(1)
+
+        src = src.cuda()
+        prev_tgt = prev_tgt.cuda()  # not actually used
+        tgt = tgt.cuda()  # not actually used
+        src_mask = src_mask.cuda()
+        tgt_mask = tgt_mask.cuda()  # not actually used
+        imgs = imgs.cuda()
+        imgs = imgs.type(torch.float32) / 255.  # convert to float
+        lmks = lmks.cuda()
+        mels = mels.cuda()
+ 
+        # get predictions
+        if bsz < 10:
+            print("last batch pass")  # HACK(demi)
+            continue
+        for t in range(10):  # double check
+            assert ids[t][0].item() == counter + t
+        predict_tgt = torch.Tensor(predict_tgts[counter:counter+10]).type(tgt.dtype).cuda()
+        assert tgt.shape == predict_tgt.shape
+        
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, mels, aux_models, viz=True)
+        
+        # log losses
+        losses.append(loss.item())
+        latent_losses.append(viz_info["latent_loss"])
+        perc_losses.append(viz_info.get("perceptual_loss", 0))
+        img_losses.append(viz_info.get("image_loss", 0))
+        sync_losses.append(viz_info.get("sync_loss", 0))
+        lmk_losses.append(viz_info.get("lmk_loss",0))
+
+ 
+        counter += 10
+    
+
+    eval_dict = {"type": "scaled",
+        "loss": np.mean(losses),
+        "latent_loss": np.mean(latent_losses),  # scaled 512*18
+        "perc_loss": np.mean(perc_losses),   # scaled 100
+        "img_loss": np.mean(img_losses),  # scaled 512*18
+        "sync_loss": np.mean(sync_losses),
+        "lmk_loss": np.mean(lmk_losses) }  # scaled 10
+ 
+    with open(save_path, "w") as f:
+        json.dump(eval_dict, f)
+ 
+
+    eval_dict = {"type": "noscale",
+        "loss": np.mean(losses),
+        "latent_loss": np.mean(latent_losses) / (512*18.),  # scaled 512*18
+        "perc_loss": np.mean(perc_losses) / 100.,   # scaled 100
+        "img_loss": np.mean(img_losses) / (512*18.),  # scaled 512*18
+        "sync_loss": np.mean(sync_losses) / 10.,
+        "lmk_loss": np.mean(lmk_losses) / 10.}  # scaled 10
+ 
+    with open(save_path, "a") as f:
+        f.write("\n")
+        json.dump(eval_dict, f)
+ 
 
 if __name__ == "__main__":
     print("now parser")
@@ -288,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument("--test_path", type=str, default="data/timit/videos/test/s3")  # only support one test video for now, path to the specific test video folder
     parser.add_argument("--neutral_path", type=str, default=None)
     parser.add_argument("--output", type=str, default="output/debug")
-    parser.add_argument("--load_ckpt", type=str, default=None)
+    parser.add_argument("--load_ckpt", type=str, default=None)  # NB(demi): currently, not used for evaluation
     parser.add_argument("--load_optim", type=int, default=0)
 
 
@@ -347,6 +329,16 @@ if __name__ == "__main__":
     parser.add_argument("--save_every", type=int, default=10000)
 
     args = parser.parse_args()
+    
+    # NB(demi): force all loss to be > 0
+    args.lmk_loss = 0.1
+    args.img_loss = 0.1
+    args.sync_loss = 0.1
+    args.perceptual_loss = 0.1
+    args.image_mouth = 1  # only on mouth for now
+    args.image_type = "gt"
+
+    
     print("args=",args)
         
     args.viz_dir = f"{args.output}/viz" 
@@ -436,8 +428,6 @@ if __name__ == "__main__":
                 p.requires_grad = False  # Q(demi): is it necessary? how about other models? we didn't specify it to be differentiable in optimizer?
             aux_models["syncnet"] = syncnet
 
-    print("aux_models=", aux_models)
-
 
     print("preprocess")
     # preprocess dataset
@@ -451,23 +441,8 @@ if __name__ == "__main__":
     print("loading datasets")
     train_dataset = Audio2FrameDataset(args, args.train_path, "train", sample="dense", input_dim=input_dim, output_dim=output_dim) 
     val_dataset = Audio2FrameDataset(args, args.train_path, "val", sample="sparse", input_dim=input_dim, output_dim=output_dim)
-    test_dataset = Audio2FrameDataset(args, args.test_path, "test", sample="sparse", input_dim=input_dim, output_dim=output_dim)
     
-    if args.mode == "sanity_check":
-        train_dataset.data_len = 100
-        val_dataset.data_len=100
-        test_dataset.data_len=50
-
-    if args.mode == "slow":
-        train_dataset.data_len = train_dataset.data_len // 4
-        val_dataset.data_len = val_dataset.data_len // 4
-        test_dataset.data_len = test_dataset.data_len // 4
- 
-    if args.mode == "slow2":
-        train_dataset.data_len = train_dataset.data_len // 8
-        val_dataset.data_len = val_dataset.data_len // 8
-        test_dataset.data_len = test_dataset.data_len // 8
-   
+  
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers)
@@ -475,13 +450,6 @@ if __name__ == "__main__":
         val_dataset, batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=False)
-    test_data_loader = data_utils.DataLoader(
-        test_dataset, batch_size=1,
-        num_workers=args.num_workers,
-        shuffle=False)  # HACK(demi): use batch size = seq len
-
-    # HACK(demi): to avoid too much memory
-    args.viz_every = len(train_data_loader) // 10
 
     if not os.path.exists(f"{args.output}/inference"):
         os.makedirs(f"{args.output}/inference")
@@ -507,133 +475,69 @@ if __name__ == "__main__":
 
     model.org_output_dim = org_output_dim
 
-    if args.load_ckpt is not None:
-        print(f"loading checkpoint from  {args.load_ckpt}")
-        model.load_state_dict(torch.load(f"{args.load_ckpt}")["model_state_dict"])
+   
     
-
-
-
-    # load optimizer
-    print("loading optimizer") 
-    if args.optim == "noam":
-        optimizer = NoamOpt(d_model, 2, args.warmup,
-            torch.optim.Adam(model.parameters(), lr=0, betas=(0.9,0.98), eps=1e-9))
-    else:
-        assert args.optim == "adam"
-        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=args.lr_reduce, patience=args.lr_patience)
-    
-    if args.load_ckpt is not None and args.load_optim:
-        assert args.optim == "noam"
-        steps = 20 * len(train_data_loader)
-        optimizer._step = steps
-        print("now learning rate=", optimizer.rate())
-        #embed()
-
-
-    # training and inference
-    print("start training")
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)
-    train_losses = []
-    val_losses = []
     
-    best_val = None
-    last_val = None
-    last_train = None
+    os.makedirs(f"{args.output}/evaluation", exist_ok=True)
 
-    for epoch in range(args.epochs):
-        args.cur_epoch = epoch
-        train_loss = train(args, train_data_loader, model, optimizer, aux_models)
-        print(f"EPOCH[{epoch}] | Train Loss : {train_loss:.3f}")
+    # inference evaluation
+    checkpoints = glob(f"{args.output}/best_val*.pt")
+    assert len(checkpoints) == 1
+    checkpoint = checkpoints[0]
+    print(f"loading checkpoint from {checkpoint}")
+    model.load_state_dict(torch.load(f"{checkpoint}")["model_state_dict"])
 
+    with torch.no_grad(): 
+        inference(args, input_dim, output_dim, neutral_vec, model, mode="autoreg",
+            save_path=f"{args.output}/evaluation/best_val_inference.json")
+        inference(args, input_dim, output_dim, neutral_vec, model, mode="tf",
+            save_path=f"{args.output}/evaluation/tf_best_val_inference.json")
+
+
+     
+    # validate all epoch checkpoints
+    checkpoints = glob(f"{args.output}/epoch*.pt")
+    for checkpoint in checkpoints:
+        epoch = int(checkpoint.split("/")[-1].split("_")[0].replace("epoch",""))
+        prefix = f"epoch{epoch:02d}"  # reformat to 02d so sorting is accurate
+        print(f"loading checkpoint from {checkpoint}")
+        model.load_state_dict(torch.load(f"{checkpoint}")["model_state_dict"])
         with torch.no_grad():
-            val_loss = validate(args, val_data_loader, model, aux_models)
-            print(f"EPOCH[{epoch}] | Val Loss : {val_loss:.3f}")
-
-        if args.optim == "adam":
-            scheduler.step(val_loss)
-            print("LR:", optimizer.param_groups[0]['lr'])
-
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-
-        
-        if epoch % args.save_every == 0:
-            torch.save({"model_state_dict": model.state_dict()}, f"{args.output}/epoch{epoch}_checkpoint.pt")
-
-        if best_val is None or val_loss < best_val:
-            best_val = val_loss
-            torch.save({"model_state_dict": model.state_dict()}, f"{args.output}/best_val_checkpoint.pt")
-        last_val = val_loss 
-        last_train = train_loss
-
-        train_dataset.new_samples()  # shuffle
-
-    torch.save({"model_state_dict": model.state_dict()}, f"{args.output}/last_checkpoint.pt")
-    model.load_state_dict(torch.load(f"{args.output}/best_val_checkpoint.pt")["model_state_dict"])
-
-
-    neutral_vec = torch.from_numpy(args.neutral_vec).to(device)  # now, train and test has to be the same face
+            validate(args, val_data_loader, model, save_path=f"{args.output}/evaluation/{prefix}_validation.json")
     
-    if args.mode not in ["slow2", "slow"]:
-        with torch.no_grad():
-            val_loss = validate(args, val_data_loader, model)
-            if args.sync_loss == 0.0:  # HACK(demi): sync loss cannot support test loader 
-                test_loss = validate(args, test_data_loader, model)
-            print("load model val loss=", val_loss)
-            print("load model test loss=", test_loss)
-
-        infer_dir = f"{args.output}/tf_inference"
-        if not os.path.exists(infer_dir):
-            os.makedirs(infer_dir)
-        os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-        with torch.no_grad():
-            inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
-
-    infer_dir = f"{args.output}/inference"
-    if not os.path.exists(infer_dir):
-        os.makedirs(infer_dir)
-    os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    with torch.no_grad():
-        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
-
-
-    x = list(range(args.epochs))
-    plt.plot(x, train_losses, label="train")
-    plt.plot(x, val_losses, label="val")
-    plt.xlabel("epochs")
-    plt.ylabel("loss")
-    plt.legend()
-    plt.savefig(f"{args.output}/loss_curve.png")
-
-    with open(f"{args.output}/hparams.pkl", "wb") as f:
-        pickle.dump(args, f)
-    with open(f"{args.output}/metrics.json", "a") as f:
-        json.dump({"best_val_loss": best_val, "last_val_loss": last_val, "last_train_loss": last_train}, f)
-
-    plt.clf()
+    # TODO(demi): plot loss curve over epochs
+    # plot validation loss curves
     losses = []
     latent_losses = []
     perc_losses = []
     img_losses = []
-    f = open(f"{args.output}/metrics.json", "r")
-    lines = f.readlines()
-    for line in lines:
-        json_obj = json.loads(line.rstrip())
-        if json_obj["type"] == "train":
-            losses.append(json_obj["loss"])
-            latent_losses.append(json_obj["latent_loss"])
-            perc_losses.append(json_obj["perc_loss"])
-            img_losses.append(json_obj["img_loss"])
-    
+    lmk_losses = []
+    sync_losses = []
+    eval_paths = sorted(glob(f"{args.output}/evaluation/*validation.json"))
+    print("eval_paths=",eval_paths)
+
+    for eval_path in eval_paths:
+        json_obj = json.load(open(eval_path))
+        
+        losses.append(json_obj["loss"])
+        latent_losses.append(json_obj["latent_loss"])
+        perc_losses.append(json_obj["perc_loss"])
+        img_losses.append(json_obj["img_loss"])
+        lmk_losses.append(json_obj["lmk_loss"])
+        sync_losses.append(json_obj["sync_loss"])
+
     x = list(range(len(losses)))
     plt.plot(x, losses, label="total")
     plt.plot(x, latent_losses, label="latent")
     plt.plot(x, perc_losses, label="perc")
     plt.plot(x, img_losses, label="img")
+    plt.plot(x, sync_losses, label="sync")
+    plt.plot(x, lmk_losses, label="lmk")
     plt.xlabel("epochs")
     plt.ylabel("loss")
     plt.legend()
-    plt.savefig(f"{args.output}/all_loss_curve.png")
- 
+    plt.savefig(f"{args.output}/evaluation/validation_curve.png")
+       
+    
+

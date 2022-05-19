@@ -41,7 +41,7 @@ def train(args, data_loader, model, opt, aux_models):
 
     losses = []
     latent_losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="train"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="train"):
         
         opt.zero_grad()
 
@@ -60,12 +60,13 @@ def train(args, data_loader, model, opt, aux_models):
         imgs = imgs.cuda()
         imgs = imgs.type(torch.float32) / 255.  # convert to float
         lmks = lmks.cuda()
+        mels = mels.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
         assert args.seq_len > 0
         
-        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=True)
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, mels, aux_models, viz=True)
         if n_iter % args.viz_every == 0:
             visualize(args, viz_info, f"{args.viz_dir}/train_e{args.cur_epoch}_i{n_iter}")
 
@@ -90,7 +91,7 @@ def validate(args, data_loader, model, generator=None):
 
     losses = []
     latent_losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="validate"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="validate"):
 
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -104,12 +105,13 @@ def validate(args, data_loader, model, generator=None):
         imgs = imgs.cuda()
         imgs = imgs.type(torch.float32) / 255.  # convert to float
         lmks = lmks.cuda()
+        mels = mels.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
         assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
 
-        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=True)
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, mels, aux_models, viz=True)
         if n_iter % args.viz_every == 0:
             visualize(args, viz_info, f"{args.viz_dir}/val_e{args.cur_epoch}_i{n_iter}")
 
@@ -151,7 +153,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     
     new_vecs_list = []
 
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="inference"):
         
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -195,7 +197,6 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     if args.latent_type == "stylespace":
         np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
         os.system(f"rm {infer_dir}/predict_*.pt")
-    assert final_vecs.shape == (len(data_loader), org_output_dim)
     return 
 
 
@@ -224,6 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("--lmk_loss", type=float, default=0.0)
     parser.add_argument("--face_box", type=int, nargs="+", default=[25,63,231,256])  # set for img_size=256, (x1,y1,x2,y2)
     parser.add_argument("--perceptual_loss", type=float, default=0.0)
+    parser.add_argument("--sync_loss", type=float, default=0.0)
     
     # model
     parser.add_argument("--pca", type=str, default=None)
@@ -265,7 +267,9 @@ if __name__ == "__main__":
 
     args.viz_dir = f"{args.output}/viz" 
     os.makedirs(args.viz_dir, exist_ok=True)
-
+    
+    if args.sync_loss > 0.0:
+        assert False, "inference code has not support sync loss yet"
     assert args.model in ["transformer", "mlp", "linear"]
     if args.model == "mlp":
         if args.seq_len != 1:
