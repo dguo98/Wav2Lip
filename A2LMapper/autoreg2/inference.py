@@ -3,6 +3,7 @@ import json
 import sys
 import argparse
 import pickle
+import cv2
 import matplotlib.pyplot as plt
 from glob import glob
 from tqdm import tqdm
@@ -17,94 +18,111 @@ from torch.utils import data as data_utils
 
 sys.path.append(".")
 from dataset import Audio2FrameDataset
-from model import Transformer, LinearMapper
+from model import Transformer, LinearMapper, AutoRegMLPMapper
 from optim import NoamOpt
+from criterion import get_loss
+from visualize import visualize, log_metrics
 
-def train(args, data_loader, model, opt):
+# auxiliary models
+from utils.model_utils import setup_model
+from HGNet.networks import HGNet, FaceScoreNet, heatmap_to_landmarks, compute_xycoords
+from HGNet.common.global_constants import *
+from HGNet.convert_weights import DsConvTF, load_tf_vars, ConvTF
+from HGNet.common.auxiliary_ftns import box_from_landmarks
+from stylegan2_criteria.lpips.lpips import LPIPS
+
+# preprocessing
+from preprocess import preprocess_images, preprocess_lmks
+
+def train(args, data_loader, model, opt, aux_models):
     model.train()
 
     total = len(data_loader)
 
     losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="train"):
-
+    latent_losses = []
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="train"):
+        
         opt.zero_grad()
 
         bsz = src.size(0)
         seq_len = src.size(1)
-        assert src.shape == (bsz, seq_len, 512)
+        assert src.shape == (bsz, seq_len, model.input_dim)
         
+        if n_iter == 0:
+            print("train first iters ids=", ids)
+
         src = src.cuda()
         prev_tgt = prev_tgt.cuda()
         tgt = tgt.cuda()
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
+        imgs = imgs.cuda()
+        imgs = imgs.type(torch.float32) / 255.  # convert to float
+        lmks = lmks.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
+        assert args.seq_len > 0
         
-        if args.seq_len == 0:
-            loss = torch.nn.MSELoss(reduction="mean")(predict_tgt,tgt)
-            loss = loss*model.output_dim
-        else:
-            loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
-            loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
-            #print("mean=", torch.nn.MSELoss(reduction="mean")(predict_tgt,tgt))
-            #print("try to run sum (loss*loss_mask) / sum(loss_mask)")
-            #embed()
-            assert loss.shape == (bsz, seq_len, model.output_dim)
-            
-            loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(dtype=loss.dtype)
-            #loss = loss * model.output_dim  # only average across batch, and sequence, but not dimensions
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=True)
+        if n_iter % args.viz_every == 0:
+            visualize(args, viz_info, f"{args.viz_dir}/train_e{args.cur_epoch}_i{n_iter}")
+
 
         # MSE Loss for now
         losses.append(loss.item())
-        
-        if n_iter % 100 == 0 and n_iter > 0:
+        latent_losses.append(viz_info["latent_loss"])
+       
+        if n_iter % 30 == 0 and n_iter > 0 and args.mode == "debug":
            print("loss avg=", np.mean(losses[-100:]))
+           print("latent loss avg=", np.mean(latent_losses[-100:]))
 
         loss.backward()
         opt.step()
     return np.mean(losses)
         
 
-def validate(args, data_loader, model):
+def validate(args, data_loader, model, generator=None):
     model.eval()
 
     total = len(data_loader)
 
     losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="validate"):
+    latent_losses = []
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="validate"):
 
         bsz = src.size(0)
         seq_len = src.size(1)
-        assert src.shape == (bsz, seq_len, 512)
+        assert src.shape == (bsz, seq_len, model.input_dim)
         
         src = src.cuda()
         prev_tgt = prev_tgt.cuda()
         tgt = tgt.cuda()
         src_mask = src_mask.cuda()
         tgt_mask = tgt_mask.cuda()
+        imgs = imgs.cuda()
+        imgs = imgs.type(torch.float32) / 255.  # convert to float
+        lmks = lmks.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
-        if args.mode == "copy":
-            predict_tgt = prev_tgt
         assert predict_tgt.shape == tgt.shape
         assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
 
-        loss_mask = src_mask.reshape(bsz, seq_len, 1).float()
-        loss = torch.nn.MSELoss(reduction="none")(predict_tgt, tgt) 
-        assert loss.shape == (bsz, seq_len, model.output_dim)
-        loss = torch.sum(loss * loss_mask) / torch.sum(loss_mask) #.type(loss.dtype)
-        #loss = loss * model.output_dim  # only average across batch, and sequence, but not dimensions
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=True)
+        if n_iter % args.viz_every == 0:
+            visualize(args, viz_info, f"{args.viz_dir}/val_e{args.cur_epoch}_i{n_iter}")
+
 
         # MSE Loss for now
         losses.append(loss.item())
+        latent_losses.append(viz_info["latent_loss"])
 
+    print("validate latent_loss=", np.mean(latent_losses))
     return np.mean(losses)
-
-
-def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
+ 
+def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
+    assert mode in ["autoreg", "tf"]
     model.eval()
 
     total = len(data_loader)
@@ -114,6 +132,7 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
     
     output_dim = model.output_dim
     org_output_dim = model.org_output_dim
+
     cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
     if args.pca is not None:  
         # quite hacky now -- in theory we can rewrite pca on torch
@@ -121,15 +140,18 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
         cur_vec = args.pca.transform(cur_vec)[:, args.pca_dims]
         cur_vec = torch.from_numpy(cur_vec).cuda()
          
+        
+    
     counter = 0
     # todo(demi): support rolling/overlapping source context
 
     def subsequent_mask(size):
         mask = 1-np.triu(np.ones((1,size,size)),k=1)
         return torch.from_numpy(mask).cuda()
-
+    
     new_vecs_list = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="inference"):
         
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -148,10 +170,6 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
             out = model.decode(memory, src_mask, prev_tgt, tgt_mask, gen=False)
             assert out.shape[:2] == (bsz, prev_tgt.size(1))
             predict_tgt = model.generate(out[:, -1])
-            if args.mode == "copy":
-                predict_tgt = predict_tgt*0
-            elif args.mode == "gt":
-                predict_tgt = tgt[0, i]
             
             if args.pca is not None:
                 vecs = predict_tgt.detach().cpu().numpy().reshape(1,output_dim)
@@ -167,111 +185,51 @@ def tf_inference(args, data_loader, model, infer_dir, neutral_vec):
                 torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
             counter += 1
             
-            predict_tgt = tgt[0, i]  # teacher forcing
+            if mode == "tf":
+                predict_tgt = tgt[0, i]  # teacher forcing
             prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
             cur_vec = predict_tgt
             assert prev_tgt.shape == (bsz, i+2, output_dim)
-    final_vecs = np.stack(new_vecs_list, axis=0)
-    if args.latent_type == "stylespace":
-        np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
-        os.system(f"rm {infer_dir}/predict_*.pt")
-    assert final_vecs.shape == (len(data_loader), org_output_dim)
-
-
-    return 
-
-def inference(args, data_loader, model, infer_dir, neutral_vec):
-    model.eval()
-
-    total = len(data_loader)
-    neutral_vec = neutral_vec.reshape(1, -1).type(torch.float32)
-
-    losses = []
     
-    output_dim = model.output_dim
-    org_output_dim = model.org_output_dim
-    cur_vec = neutral_vec.reshape(-1) - neutral_vec.reshape(-1)  
-    counter = 0
-    if args.pca is not None:  
-        # quite hacky now -- in theory we can rewrite pca on torch
-        cur_vec = torch.zeros_like(neutral_vec).cpu().numpy().reshape(1, org_output_dim)
-        cur_vec = args.pca.transform(cur_vec)[:, args.pca_dims]
-        cur_vec = torch.from_numpy(cur_vec).cuda()
-         
-    # todo(demi): support rolling/overlapping source context
-
-    def subsequent_mask(size):
-        mask = 1-np.triu(np.ones((1,size,size)),k=1)
-        return torch.from_numpy(mask).cuda()
-
-    new_vecs_list = []
-
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask) in tqdm(enumerate(data_loader),total=total, desc="inference"):
-        
-        bsz = src.size(0)
-        seq_len = src.size(1)
-        assert bsz == 1
-
-        src = src.cuda()
-        prev_tgt = prev_tgt.cuda()  # not actually used
-        prev_tgt = prev_tgt * 0
-        tgt = tgt.cuda()  # not actually used
-        tgt = tgt * 0
-        src_mask = src_mask.cuda()
-        tgt_mask = tgt_mask.cuda()  # not actually used
-        
-        memory = model.encode(src, src_mask)
-        prev_tgt = cur_vec.reshape(1, 1, output_dim)
-        for i in range(seq_len):
-            tgt_mask = subsequent_mask(prev_tgt.size(1))
-            out = model.decode(memory, src_mask, prev_tgt, tgt_mask, gen=False)
-            assert out.shape[:2] == (bsz, prev_tgt.size(1))
-            predict_tgt = model.generate(out[:, -1])
-            if args.mode == "debug":
-                predict_tgt = predict_tgt*0
-            
-            if args.pca is not None:
-                vecs = predict_tgt.detach().cpu().numpy().reshape(1,output_dim)
-                new_vecs = np.repeat(args.pca_neutral_vec, len(vecs), axis=0)
-                new_vecs[:, args.pca_dims] = vecs
-                new_vecs = args.pca.inverse_transform(new_vecs)
-                new_vecs = new_vecs + args.neutral_vec
-                new_vecs_list.append(new_vecs.reshape(-1))
-                new_vecs = torch.from_numpy(new_vecs).reshape(-1)
-                torch.save(new_vecs, f"{infer_dir}/predict_{counter:06d}.pt")
-            else:
-                new_vecs_list.append((predict_tgt+neutral_vec).reshape(-1).detach().cpu().numpy())
-                torch.save(predict_tgt.reshape(-1) + neutral_vec.reshape(-1), f"{infer_dir}/predict_{counter:06d}.pt")
-            counter += 1
-
-            prev_tgt = torch.cat([prev_tgt, predict_tgt.reshape(1,1,output_dim)], dim=1)
-            cur_vec = predict_tgt
-            assert prev_tgt.shape == (bsz, i+2, output_dim)
     final_vecs = np.stack(new_vecs_list, axis=0)
     if args.latent_type == "stylespace":
         np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
         os.system(f"rm {infer_dir}/predict_*.pt")
     assert final_vecs.shape == (len(data_loader), org_output_dim)
-
     return 
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_path", type=str, default="data_mlpmap/synthesia-obama-trim")
-    parser.add_argument("--test_path", type=str, default="eval_mlpmap/eval-1")
+    parser.add_argument("--train_path", type=str, default="data/timit/videos")  # parent folder of train video folders
+    parser.add_argument("--test_path", type=str, default="data/timit/videos/test/s3")  # only support one test video for now, path to the specific test video folder
     parser.add_argument("--neutral_path", type=str, default=None)
     parser.add_argument("--output", type=str, default="output/debug")
+    parser.add_argument("--load_ckpt", type=str, default=None)
+    parser.add_argument("--load_optim", type=int, default=0)
 
 
     parser.add_argument("--num_workers", type=int, default=0)
-    
     parser.add_argument("--mode", type=str, default="default", help="support: [default]")
     parser.add_argument("--latent_type", type=str, default="w+", help="latent types: [w+, stylespace]")
-    parser.add_argument("--use_pose", type=int, default=0)
 
+    # image loss
+    parser.add_argument("--image_type", type=str, default="none", help="[none, gt, gan]")
+    parser.add_argument("--image_size", type=int, default=1024, help="must be squre, dataloader first resize image to image size")
+    parser.add_argument("--image_mouth", type=int, default=0, help="mouth loss or not ")  # currently only support all vs mouth only
+
+    parser.add_argument("--img_loss", type=float, default=0.0)
+    parser.add_argument("--mouth_box", type=int, nargs="+", default=None)
+    parser.add_argument("--lmk_loss", type=float, default=0.0)
+    parser.add_argument("--face_box", type=int, nargs="+", default=[25,63,231,256])  # set for img_size=256, (x1,y1,x2,y2)
+    parser.add_argument("--perceptual_loss", type=float, default=0.0)
+    
+    # model
     parser.add_argument("--pca", type=str, default=None)
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
     parser.add_argument("--model", type=str, default="transformer")
+    parser.add_argument("--use_pose", type=int, default=0)
 
     # MLP parameters
     parser.add_argument("--nlayer", type=int, default=2)
@@ -290,18 +248,30 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--seq_len", type=int, default=320)
+
+    # NoamOpt
     parser.add_argument("--warmup", type=int, default=4000)
-
+    
+    # Adam
     parser.add_argument("--lr", type=float, default=1e-3)  # only for adam
-    #parser.add_argument("--lr_reduce", type=float, default=0.5)
-    #parser.add_argument("--lr_patience", type=int, default=5)
-    #parser.add_argument("--wd", type=float, default=0)
+    parser.add_argument("--lr_reduce", type=float, default=0.5)
+    parser.add_argument("--lr_patience", type=int, default=5)
+    parser.add_argument("--wd", type=float, default=0)
 
+    # visualize
+    parser.add_argument("--viz_every", type=int, default=100)
 
     args = parser.parse_args()
 
+    args.viz_dir = f"{args.output}/viz" 
+    os.makedirs(args.viz_dir, exist_ok=True)
 
-    
+    assert args.model in ["transformer", "mlp", "linear"]
+    if args.model == "mlp":
+        if args.seq_len != 1:
+            print("warning: seq_len is forced to set to 1")
+            args.seq_len = 1
+
     # load pca
     if args.neutral_path is None:
         assert args.pca is None, "pca need to specify corresponding neutral path"
@@ -318,8 +288,7 @@ if __name__ == "__main__":
         
         if args.pca_dims is None:
             args.pca_dims = list(range(args.pca.n_components_))
-    
-    # input dim, output dim for datasets
+
     input_dim = 512
     if args.latent_type == "w+":
         output_dim=512*18
@@ -331,18 +300,77 @@ if __name__ == "__main__":
     if args.use_pose == 1:
         input_dim = input_dim + 6
 
- 
+    # load image-loss related models
+    aux_models = {}
+
+    if args.image_type != "none":
+        code_path = "A2LMapper/autoreg2"
+        # load stylegan2
+        stylegan2_path = "A2LMapper/autoreg2/checkpoints/e4e_ffhq_encode.pt"
+        net, opts = setup_model(stylegan2_path, "cuda")
+        generator = net.decoder
+        generator.eval()
+        aux_models["generator"] = generator
+        
+        # load landmark detector
+        if args.lmk_loss > 0.0:
+            # currently don't use face predictor, use predefined boxes (from face predictor for fix size aligned image)
+            hgnet_model_path = "A2LMapper/autoreg2/HGNet/model_410400.pt"
+            checkpoint = torch.load(hgnet_model_path)
+            if "model_type" not in checkpoint or checkpoint["model_type"] == "hgnet":
+                hgnet = HGNet(INNER_NUM_LANDMARKS).to(device)
+            elif checkpoint["model_type"] == "hgnet_tf":
+                hgnet = HGNet(INNER_NUM_LANDMARKS, conv=DsConvTF).to(device)
+            else:
+                raise Exception(f"{checkpoint['model_type']} is not supported.")
+
+            hgnet.load_state_dict(checkpoint['model_state_dict'])
+            hgnet.eval()
+            aux_models["hgnet"] = hgnet
+
+            xycoords = compute_xycoords(IMAGE_SIZE_256 // 4, INNER_NUM_LANDMARKS)
+            xycoords = torch.Tensor(xycoords).to(device)
+            aux_models["xycoords"] = xycoords
+
+        # load perceptual loss
+        if args.perceptual_loss > 0.0:
+            lpips_loss = LPIPS(net_type="alex").cuda()  # NB(demi): use alex for now 
+            aux_models["lpips_loss"] = lpips_loss
+
+    # preprocess dataset
+    if args.image_type != "none":
+        if args.img_loss > 0.0:
+            preprocess_images(args)
+        if args.lmk_loss > 0.0:
+            preprocess_lmks(args, aux_models["hgnet"], aux_models["xycoords"])
+
     # datasets
     print("loading datasets")
-    train_dataset = Audio2FrameDataset(args, args.train_path, "train",sample="dense", input_dim=input_dim, output_dim=output_dim) 
+    train_dataset = Audio2FrameDataset(args, args.train_path, "train", sample="dense", input_dim=input_dim, output_dim=output_dim) 
     val_dataset = Audio2FrameDataset(args, args.train_path, "val", sample="sparse", input_dim=input_dim, output_dim=output_dim)
-    test_dataset = Audio2FrameDataset(args, args.test_path, "test",sample="sparse", input_dim=input_dim, output_dim=output_dim)
+    test_dataset = Audio2FrameDataset(args, args.test_path, "test", sample="sparse", input_dim=input_dim, output_dim=output_dim)
+    
+    if args.mode == "sanity_check":
+        train_dataset.data_len = 100
+        val_dataset.data_len=100
+        test_dataset.data_len=50
 
+    if args.mode == "slow":
+        train_dataset.data_len = train_dataset.data_len // 4
+        val_dataset.data_len = val_dataset.data_len // 4
+        test_dataset.data_len = test_dataset.data_len // 4
+
+    if args.mode == "slow2":
+        train_dataset.data_len = train_dataset.data_len // 8
+        val_dataset.data_len = val_dataset.data_len // 8
+        test_dataset.data_len = test_dataset.data_len // 8
+     
     # HACK(demi)
-    #test_dataset.data_len = min(test_dataset.data_len, 500)
-
+    test_dataset.data_len = min(test_dataset.data_len, 1000)
+   
+    # NB(demi): shuffle train dataset
     train_data_loader = data_utils.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
+        train_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers)
     val_data_loader = data_utils.DataLoader(
         val_dataset, batch_size=args.batch_size,
@@ -359,11 +387,10 @@ if __name__ == "__main__":
      
     # models and optimizers
     print("loading models")
+    
+    # transform to model's input dim and output dim
     if args.pca is not None:
         output_dim = len(args.pca_dims)
-    if args.use_pose == 1:
-        input_dim = input_dim + 6
-
     if args.model == "transformer":
         model = Transformer(args, input_dim=input_dim, output_dim=output_dim)
         print("loaded transformer on cpu")
@@ -373,50 +400,72 @@ if __name__ == "__main__":
         model = LinearMapper(args, input_dim=input_dim, output_dim=output_dim).to(device)
         d_model = 512
     else:
-        raise NotImplementedError
+        model = AutoRegMLPMapper(args, input_dim=input_dim, output_dim=output_dim).to(device)
+        d_model = args.hidden_dim
+
     model.org_output_dim = org_output_dim
 
+    if args.load_ckpt is not None:
+        print(f"loading checkpoint from  {args.load_ckpt}")
+        model.load_state_dict(torch.load(f"{args.load_ckpt}")["model_state_dict"])
+    
+
+
+
+    # load optimizer
     print("loading optimizer") 
     if args.optim == "noam":
         optimizer = NoamOpt(d_model, 2, args.warmup,
             torch.optim.Adam(model.parameters(), lr=0, betas=(0.9,0.98), eps=1e-9))
     else:
         assert args.optim == "adam"
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-       
+        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=args.lr_reduce, patience=args.lr_patience)
+    
+    if args.load_ckpt is not None and args.load_optim:
+        assert args.optim == "noam"
+        steps = 20 * len(train_data_loader)
+        optimizer._step = steps
+        print("now learning rate=", optimizer.rate())
+        #embed()
+
+
     # training and inference
     print("start training")
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)
     train_losses = []
     val_losses = []
     
+    best_val = None
+    last_val = None
+    last_train = None
+
     model.load_state_dict(torch.load(f"{args.output}/best_val_checkpoint.pt")["model_state_dict"])
-        
+
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)  # now, train and test has to be the same face
 
-    
-    if args.mode not in ["gt", "quick"]:
-        train_loss = validate(args, train_data_loader, model)
-        val_loss = validate(args, val_data_loader, model)
-        test_loss = validate(args, test_data_loader, model)
-        print("train loss=", train_loss)
-        print("val loss=", val_loss)
-        print("test loss=", test_loss)
+    args.cur_epoch = args.epochs
+    if args.mode not in ["slow", "slow2"]:
+        with torch.no_grad():
+            val_loss = validate(args, val_data_loader, model)
+            test_loss = validate(args, test_data_loader, model)
+        print("load model val loss=", val_loss)
+        print("load model test loss=", test_loss)
 
-
+    # NB(demi): deprecated for now
     infer_dir = f"{args.output}/tf_inference"
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    tf_inference(args, test_data_loader, model, infer_dir, neutral_vec)
-
-    if args.mode == "gt":
-        sys.exit("only run tf inference in gt mode")
+    with torch.no_grad():
+        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
 
     infer_dir = f"{args.output}/inference"
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    inference(args, test_data_loader, model, infer_dir, neutral_vec)
+    with torch.no_grad():
+        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
 
-       
+
+

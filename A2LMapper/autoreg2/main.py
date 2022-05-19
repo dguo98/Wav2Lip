@@ -3,6 +3,7 @@ import json
 import sys
 import argparse
 import pickle
+import cv2
 import matplotlib.pyplot as plt
 from glob import glob
 from tqdm import tqdm
@@ -20,13 +21,18 @@ from dataset import Audio2FrameDataset
 from model import Transformer, LinearMapper, AutoRegMLPMapper
 from optim import NoamOpt
 from criterion import get_loss
-from visualize import visualize
+from visualize import visualize, log_metrics
 
 # auxiliary models
 from utils.model_utils import setup_model
+from HGNet.networks import HGNet, FaceScoreNet, heatmap_to_landmarks, compute_xycoords
+from HGNet.common.global_constants import *
+from HGNet.convert_weights import DsConvTF, load_tf_vars, ConvTF
+from HGNet.common.auxiliary_ftns import box_from_landmarks
+from stylegan2_criteria.lpips.lpips import LPIPS
 
 # preprocessing
-from preprocess import preprocess_images
+from preprocess import preprocess_images, preprocess_lmks
 
 def train(args, data_loader, model, opt, aux_models):
     model.train()
@@ -35,7 +41,10 @@ def train(args, data_loader, model, opt, aux_models):
 
     losses = []
     latent_losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="train"):
+    perc_losses = []
+    img_losses = []
+    
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="train"):
         
         opt.zero_grad()
 
@@ -43,9 +52,6 @@ def train(args, data_loader, model, opt, aux_models):
         seq_len = src.size(1)
         assert src.shape == (bsz, seq_len, model.input_dim)
         
-        if n_iter == 0:
-            print("train first iters ids=", ids)
-
         src = src.cuda()
         prev_tgt = prev_tgt.cuda()
         tgt = tgt.cuda()
@@ -53,25 +59,36 @@ def train(args, data_loader, model, opt, aux_models):
         tgt_mask = tgt_mask.cuda()
         imgs = imgs.cuda()
         imgs = imgs.type(torch.float32) / 255.  # convert to float
+        lmks = lmks.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
         assert args.seq_len > 0
         
-        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, aux_models, viz=True)
-        if n_iter % args.viz_every == 0:
-            visualize(args, viz_info, f"{args.viz_dir}/train_e{args.epoch}_i{n_iter}")
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=True)
 
+        if n_iter % args.viz_every == 0:
+            visualize(args, viz_info, f"{args.viz_dir}/train_e{args.cur_epoch}_i{n_iter}")
 
         # MSE Loss for now
         losses.append(loss.item())
         latent_losses.append(viz_info["latent_loss"])
+        perc_losses.append(viz_info.get("perceptual_loss", 0))
+        img_losses.append(viz_info.get("image_loss", 0))
+        if n_iter % args.log_every == 0 and n_iter >= 200:
+            metrics_dict = {"loss": np.mean(losses[-200:]),
+                "latent_loss": np.mean(latent_losses[-200:]),
+                "perc_loss": np.mean(perc_losses[-200:]),
+                "img_loss": np.mean(img_losses[-200:])}
+            log_metrics(args, args.cur_epoch, n_iter, "train", metrics_dict , f"{args.output}/metrics.json")
+
        
-        if n_iter % 30 == 0 and n_iter > 0 and args.mode == "debug":
-           print("loss avg=", np.mean(losses[-100:]))
-           print("latent loss avg=", np.mean(latent_losses[-100:]))
+        if n_iter % 30 == 0 and n_iter > 200 and args.mode == "debug":
+           print("loss avg=", np.mean(losses[-200:]))
+           print("latent loss avg=", np.mean(latent_losses[-200:]))
 
         loss.backward()
+
         opt.step()
     return np.mean(losses)
         
@@ -83,7 +100,9 @@ def validate(args, data_loader, model, generator=None):
 
     losses = []
     latent_losses = []
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="validate"):
+    perc_losses = []
+    img_losses = []
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="validate"):
 
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -96,21 +115,30 @@ def validate(args, data_loader, model, generator=None):
         tgt_mask = tgt_mask.cuda()
         imgs = imgs.cuda()
         imgs = imgs.type(torch.float32) / 255.  # convert to float
+        lmks = lmks.cuda()
         
         predict_tgt = model(src, prev_tgt, src_mask, tgt_mask)
         assert predict_tgt.shape == tgt.shape
         assert predict_tgt.shape == (bsz, seq_len, model.output_dim)
 
-        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, aux_models, viz=True)
-        if n_iter % args.viz_every == 0:
-            visualize(args, viz_info, f"{args.viz_dir}/val_e{args.epoch}_i{n_iter}")
+        loss, viz_info = get_loss(args, predict_tgt, tgt, src_mask, imgs, lmks, aux_models, viz=True)
 
+        if n_iter % args.viz_every == 0:
+            visualize(args, viz_info, f"{args.viz_dir}/train_e{args.cur_epoch}_i{n_iter}")
 
         # MSE Loss for now
         losses.append(loss.item())
         latent_losses.append(viz_info["latent_loss"])
+        perc_losses.append(viz_info.get("perceptual_loss", 0))
+        img_losses.append(viz_info.get("image_loss", 0))
+        if n_iter % args.log_every == 0 and n_iter >= 200:
+            metrics_dict = {"loss": np.mean(losses[-200:]),
+                "latent_loss": np.mean(latent_losses[-200:]),
+                "perc_loss": np.mean(perc_losses[-200:]),
+                "img_loss": np.mean(img_losses[-200:])}
+            log_metrics(args, args.cur_epoch, n_iter, "train", metrics_dict , f"{args.output}/metrics.json")
 
-    print("validate latent_loss=", np.mean(latent_losses))
+
     return np.mean(losses)
  
 def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
@@ -143,7 +171,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     
     new_vecs_list = []
 
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="inference"):
         
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -193,6 +221,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
 
 
 if __name__ == "__main__":
+    print("now parser")
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_path", type=str, default="data/timit/videos")  # parent folder of train video folders
     parser.add_argument("--test_path", type=str, default="data/timit/videos/test/s3")  # only support one test video for now, path to the specific test video folder
@@ -214,6 +243,7 @@ if __name__ == "__main__":
     parser.add_argument("--img_loss", type=float, default=0.0)
     parser.add_argument("--mouth_box", type=int, nargs="+", default=None)
     parser.add_argument("--lmk_loss", type=float, default=0.0)
+    parser.add_argument("--face_box", type=int, nargs="+", default=[25,63,231,256])  # set for img_size=256, (x1,y1,x2,y2)
     parser.add_argument("--perceptual_loss", type=float, default=0.0)
     
     # model
@@ -249,19 +279,24 @@ if __name__ == "__main__":
     parser.add_argument("--lr_patience", type=int, default=5)
     parser.add_argument("--wd", type=float, default=0)
 
-    # visualize
-    parser.add_argument("--viz_every", type=int, default=100)
+    # logging and visualize
+    parser.add_argument("--viz_every", type=int, default=300)
+    parser.add_argument("--log_every", type=int, default=50)
+    parser.add_argument("--save_every", type=int, default=10000)
 
     args = parser.parse_args()
-
+    print("args=",args)
+        
     args.viz_dir = f"{args.output}/viz" 
     os.makedirs(args.viz_dir, exist_ok=True)
-
+    
+    # check conflicts
     assert args.model in ["transformer", "mlp", "linear"]
     if args.model == "mlp":
         if args.seq_len != 1:
             print("warning: seq_len is forced to set to 1")
             args.seq_len = 1
+    
 
     # load pca
     if args.neutral_path is None:
@@ -293,7 +328,7 @@ if __name__ == "__main__":
 
     # load image-loss related models
     aux_models = {}
-
+    print("load models")
     if args.image_type != "none":
         code_path = "A2LMapper/autoreg2"
         # load stylegan2
@@ -305,41 +340,38 @@ if __name__ == "__main__":
         
         # load landmark detector
         if args.lmk_loss > 0.0:
-            raise NotImplementedError
-            """
-            # landmarks predictor network
-            hgnet_model_path = "A2LMapper/autoreg2/checkpoints/model_410400.pt"
-            hgnet_checkpoint = torch.load(hgnet_model_path)
-            if hgnet_checkpoint.get("model_type", "hgnet") == "hgnet":
-                hgnet = HGNet(INNER_NUM_LANDMARKS)
-            elif hgnet_checkpoint["model_type"] == "hgnet_tf":
-                hgnet = HGNet(INNER_NUM_LANDMARKS< conv=DsConvTF).cuda()
+            # currently don't use face predictor, use predefined boxes (from face predictor for fix size aligned image)
+            hgnet_model_path = "A2LMapper/autoreg2/HGNet/model_410400.pt"
+            checkpoint = torch.load(hgnet_model_path)
+            if "model_type" not in checkpoint or checkpoint["model_type"] == "hgnet":
+                hgnet = HGNet(INNER_NUM_LANDMARKS).to(device)
+            elif checkpoint["model_type"] == "hgnet_tf":
+                hgnet = HGNet(INNER_NUM_LANDMARKS, conv=DsConvTF).to(device)
             else:
-                raise NotImplementedError
-            hgnet.load_state_dict(hgnet_checkpoint["model_state_dict"])
+                raise Exception(f"{checkpoint['model_type']} is not supported.")
+
+            hgnet.load_state_dict(checkpoint['model_state_dict'])
             hgnet.eval()
             aux_models["hgnet"] = hgnet
-            
-            # face predictor network
-            ssd_label_path = f"{code_path}/HGNet-pytorch-master/SSD/models/mb2-ssd-lite-face-detector-210721.pth"
-            ssd_model_path = f"{code_path}/HGNet-pytorch-master/SSD/models/metaface-model-labels.txt"
 
-            class_names = [name.strip() for name in open(ssd_label_path).readlines()]
-            num_classes = len(class_names)
-            ssd = create_mobilev2_ssd_lite(len(class_names), is_test=True, device="cuda")
-            ssd.load(ssd_model_path)
-            predictor = create_mobilenetv2_ssd_lite_predictor(ssd, candidate_size=10, device="cuda")
-            aux_models["predictor"] = predictor
-            """
+            xycoords = compute_xycoords(IMAGE_SIZE_256 // 4, INNER_NUM_LANDMARKS)
+            xycoords = torch.Tensor(xycoords).to(device)
+            aux_models["xycoords"] = xycoords
 
         # load perceptual loss
         if args.perceptual_loss > 0.0:
-            raise NotImplementedError
+           lpips_loss = LPIPS(net_type="alex").cuda()  # NB(demi): use alex for now 
+           aux_models["lpips_loss"] = lpips_loss
 
+    print("aux_models=", aux_models)
+
+    print("preprocess")
     # preprocess dataset
     if args.image_type != "none":
         if args.img_loss > 0.0:
             preprocess_images(args)
+        if args.lmk_loss > 0.0:
+            preprocess_lmks(args, aux_models["hgnet"], aux_models["xycoords"])
 
     # datasets
     print("loading datasets")
@@ -357,8 +389,11 @@ if __name__ == "__main__":
         val_dataset.data_len = val_dataset.data_len // 4
         test_dataset.data_len = test_dataset.data_len // 4
  
+    if args.mode == "slow2":
+        train_dataset.data_len = train_dataset.data_len // 8
+        val_dataset.data_len = val_dataset.data_len // 8
+        test_dataset.data_len = test_dataset.data_len // 8
    
-    # NB(demi): shuffle train dataset
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers)
@@ -370,6 +405,9 @@ if __name__ == "__main__":
         test_dataset, batch_size=1,
         num_workers=args.num_workers,
         shuffle=False)  # HACK(demi): use batch size = seq len
+
+    # HACK(demi): to avoid too much memory
+    args.viz_every = len(train_data_loader) // 10
 
     if not os.path.exists(f"{args.output}/inference"):
         os.makedirs(f"{args.output}/inference")
@@ -433,12 +471,15 @@ if __name__ == "__main__":
     if args.mode == "debug":
         args.epoch = -1
         #val_loss = validate(args, val_data_loader, model, aux_models)
+
     for epoch in range(args.epochs):
-        args.epoch = epoch
+        args.cur_epoch = epoch
         train_loss = train(args, train_data_loader, model, optimizer, aux_models)
         print(f"EPOCH[{epoch}] | Train Loss : {train_loss:.3f}")
-        val_loss = validate(args, val_data_loader, model, aux_models)
-        print(f"EPOCH[{epoch}] | Val Loss : {val_loss:.3f}")
+
+        with torch.no_grad():
+            val_loss = validate(args, val_data_loader, model, aux_models)
+            print(f"EPOCH[{epoch}] | Val Loss : {val_loss:.3f}")
 
         if args.optim == "adam":
             scheduler.step(val_loss)
@@ -447,6 +488,9 @@ if __name__ == "__main__":
         train_losses.append(train_loss)
         val_losses.append(val_loss)
 
+        
+        if epoch % args.save_every == 0:
+            torch.save({"model_state_dict": model.state_dict()}, f"{args.output}/epoch{epoch}_checkpoint.pt")
 
         if best_val is None or val_loss < best_val:
             best_val = val_loss
@@ -462,23 +506,26 @@ if __name__ == "__main__":
 
     neutral_vec = torch.from_numpy(args.neutral_vec).to(device)  # now, train and test has to be the same face
     
-    if args.mode != "slow":
-        val_loss = validate(args, val_data_loader, model)
-        test_loss = validate(args, test_data_loader, model)
-        print("load model val loss=", val_loss)
-        print("load model test loss=", test_loss)
+    if args.mode not in ["slow2", "slow"]:
+        with torch.no_grad():
+            val_loss = validate(args, val_data_loader, model)
+            test_loss = validate(args, test_data_loader, model)
+            print("load model val loss=", val_loss)
+            print("load model test loss=", test_loss)
 
         infer_dir = f"{args.output}/tf_inference"
         if not os.path.exists(infer_dir):
             os.makedirs(infer_dir)
         os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
+        with torch.no_grad():
+            inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="tf")
 
     infer_dir = f"{args.output}/inference"
     if not os.path.exists(infer_dir):
         os.makedirs(infer_dir)
     os.system(f"cp {args.test_path}/audio.wav {infer_dir}/")
-    inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
+    with torch.no_grad():
+        inference(args, test_data_loader, model, infer_dir, neutral_vec, mode="autoreg")
 
 
     x = list(range(args.epochs))
@@ -491,6 +538,31 @@ if __name__ == "__main__":
 
     with open(f"{args.output}/hparams.pkl", "wb") as f:
         pickle.dump(args, f)
-    with open(f"{args.output}/metrics.json", "w") as f:
+    with open(f"{args.output}/metrics.json", "a") as f:
         json.dump({"best_val_loss": best_val, "last_val_loss": last_val, "last_train_loss": last_train}, f)
 
+    plt.clf()
+    losses = []
+    latent_losses = []
+    perc_losses = []
+    img_losses = []
+    f = open(f"{args.output}/metrics.json", "r")
+    lines = f.readlines()
+    for line in lines:
+        json_obj = json.loads(line.rstrip())
+        if json_obj["type"] == "train":
+            losses.append(json_obj["loss"])
+            latent_losses.append(json_obj["latent_loss"])
+            perc_losses.append(json_obj["perc_loss"])
+            img_losses.append(json_obj["img_loss"])
+    
+    x = list(range(len(losses)))
+    plt.plot(x, losses, label="total")
+    plt.plot(x, latent_losses, label="latent")
+    plt.plot(x, perc_losses, label="perc")
+    plt.plot(x, img_losses, label="img")
+    plt.xlabel("epochs")
+    plt.ylabel("loss")
+    plt.legend()
+    plt.savefig(f"{args.output}/all_loss_curve.png")
+ 

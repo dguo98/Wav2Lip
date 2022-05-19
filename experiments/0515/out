@@ -1,0 +1,44 @@
+start import
+import second
+import third
+import 4th
+utils: import first
+utils: import second
+psp: import 1st
+psp: import 2nd
+encoder: import 1th
+encoder: import 2nd
+encoder import 3rd
+encoder import 4rd
+in stylegan2 model
+stylegan2 model: import
+styelgan2 model: import finish
+encoder: finish import
+pssp: import generator
+psp: immport model paths
+psp: import 3rd
+utils: import 3rd
+utils: finish import
+importHGNEt
+import lpips
+import 5th
+pp start impot
+pp importsecond
+pp finish import
+finish import
+now parser
+args= Namespace(train_path='/sailhome/demiguo/demiguo/research/Wav2Lip/data/timit/videos', test_path='/sailhome/demiguo/demiguo/research/Wav2Lip/data/timit/videos/test/s3', neutral_path=None, output='/jagupard24/scr0/demiguo/A00084', load_ckpt='logs/A00026/best_val_checkpoint.pt', load_optim=0, num_workers=0, mode='slow2', latent_type='w+', image_type='gt', image_size=256, image_mouth=0, img_loss=0.0, mouth_box=[175, 80, 215, 176], lmk_loss=0.5, face_box=[25, 63, 231, 256], perceptual_loss=0.0, pca=None, pca_dims=None, model='transformer', use_pose=0, nlayer=2, hidden_dim=1024, h=2, d_model=512, d_ff=512, dropout=0.3, N=5, optim='noam', batch_size=2, epochs=1, seq_len=1, warmup=4000, lr=0.001, lr_reduce=0.5, lr_patience=5, wd=0, viz_every=1000, log_every=50)
+laod models
+Loading e4e over the pSp framework from checkpoint: A2LMapper/autoreg2/checkpoints/e4e_ffhq_encode.pt
+preprocess
+loading datasets
+loading models
+loaded transformer on cpu
+loading checkpoint from  logs/A00026/best_val_checkpoint.pt
+loading optimizer
+start training
+train first iters ids= tensor([[ 943],
+        [3824]])
+EPOCH[0] | Train Loss : 17.966
+validate latent_loss= 29.59923741284454
+EPOCH[0] | Val Loss : 21.168

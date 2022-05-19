@@ -41,7 +41,9 @@ class Audio2FrameDataset(object):
         self.audio_vecs_list = []
         self.latent_vecs_list = []
         self.pose_vecs_list = []
+        self.lmk_vecs_list = []
         self.cache_images = None
+
         #self.images = []  # if args.img_loss > 0.0, then: it's entire image if args.image_mouth < 1.0, else only mouth image
 
         if args.mouth_box is not None:
@@ -66,9 +68,10 @@ class Audio2FrameDataset(object):
             self.audio_vecs_list.append(np.load(f"{folder}/wav2lip.npy"))
             
             # load images
-            """
             if self.image_type != "none":
-
+                if args.lmk_loss > 0.0:
+                    self.lmk_vecs_list.append(np.load(f"{folder}/{args.image_type}_lmks_r{args.image_size}.npy"))
+                """
                 # load images
                 if args.img_loss > 0.0:
                     folder_images = np.load(f"{folder}/{args.image_type}_images_r{args.image_size}.npy")
@@ -76,7 +79,7 @@ class Audio2FrameDataset(object):
                         folder_images = folder_images[:, x1:x2, y1:y2]  # only need mouth to save memory
                     assert folder_images.shape[0] == len(self.audio_vecs_list[-1]), f"# of images not matched in path {folder}"
                     self.images.append(folder_images)
-            """
+                """
             
             if self.latent_type == "w+":
                 self.latent_vecs_list.append(np.load(f"{folder}/frame.npy").reshape(-1,18*512))  # NB(demi): even test needs to have frame.npy for now
@@ -123,15 +126,30 @@ class Audio2FrameDataset(object):
         pose_vecs = self.pose_vecs_list[folder_id]
 
         if self.image_type != "none":
-            if idx == 0:
-                self.cache_images = np.load(f"{folder}/{self.args.image_type}_images_r{self.args.image_size}.npy")
-            image_vecs = self.cache_images
-            if self.args.image_mouth == 1:
-                x1, y1, x2, y2 = self.args.mouth_box
-                image_vecs = image_vecs[:, x1:x2, y1:y2]
+            if self.args.img_loss > 0.0 or self.args.perceptual_loss > 0.0:
+                if idx == 0:
+                    self.cache_images = np.load(f"{folder}/{self.args.image_type}_images_r{self.args.image_size}.npy")
+                image_vecs = self.cache_images
+
+                # image mouth = 1 also load entire image
+                """
+                if self.args.image_mouth == 1:
+                    x1, y1, x2, y2 = self.args.mouth_box
+                    image_vecs = image_vecs[:, x1:x2, y1:y2]
+                """
+                assert image_vecs.shape[0] == latent_vecs.shape[0]
+            else:
+                image_vecs = None
+                
+            if self.args.lmk_loss > 0.0:
+                lmk_vecs = self.lmk_vecs_list[folder_id]
+            else:
+                lmk_vecs = None
+        else:
+            image_vecs = None
+            lmk_vecs = None
 
 
-            assert image_vecs.shape[0] == latent_vecs.shape[0]
             
         idx = self.sample_orders[folder_id][idx]
         
@@ -144,8 +162,11 @@ class Audio2FrameDataset(object):
         r_idx = min(folder_len, idx + self.seq_len)
         idxs = np.array(range(idx, r_idx))
         src = audio_vecs[idx: r_idx]
-        if self.image_type != "none":
+
+        if image_vecs is not None:
             imgs = image_vecs[idx: r_idx]
+        if lmk_vecs is not None:
+            lmks = lmk_vecs[idx: r_idx]
 
         if self.use_pose:
             src = np.concatenate([src, pose_vecs[idx:r_idx]], axis=1)
@@ -183,8 +204,10 @@ class Audio2FrameDataset(object):
             
             src_mask = np.concatenate([src_mask, np.zeros(new_len,dtype=src_mask.dtype)],axis=0)
             tgt_mask = np.concatenate([tgt_mask, np.zeros(new_len, dtype=tgt_mask.dtype)],axis=0)
-            if self.image_type != "none":
+            if image_vecs is not None:
                 imgs = np.concatenate([imgs, np.zeros((new_len,imgs.shape[1],imgs.shape[2],3),dtype=imgs.dtype)],axis=0)
+            if lmk_vecs is not None:
+                lmks = np.concatenate([lmks, np.zeros((new_len, lmks.shape[1], lmks.shape[2]),dtype=lmks.dtype)],axis=0)
 
         src_mask = src_mask.reshape(1, self.seq_len)
         tgt_mask = tgt_mask.reshape(1, self.seq_len).repeat(self.seq_len, axis=0)
@@ -199,10 +222,12 @@ class Audio2FrameDataset(object):
             tgt = self.args.pca.transform(tgt)[:, self.args.pca_dims]
             prev_tgt = self.args.pca.transform(prev_tgt)[:, self.args.pca_dims]
         
-        if self.image_type != "none":
-            return idxs, src, prev_tgt, tgt, src_mask, tgt_mask, imgs
-        else:
-            return idxs, src, prev_tgt, tgt, src_mask, tgt_mask, idxs
+        if image_vecs is None:
+            imgs = idxs  # hack
+        if lmk_vecs is None:
+            lmks = idxs  # hack
+        
+        return idxs, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks
 
     def get_neutral(self):
         return self.args.neutral_vec
