@@ -33,8 +33,6 @@ if __name__ == "__main__":
     for t, mp4 in enumerate(mp4s):
         if t % args.ngpu != args.gpu:
             continue
-        if mp4.split("/")[-1] in ["s0.mp4", "s1.mp4", "s10.mp4", "s11.mp4", "s12.mp4", "s14.mp4", "s17.mp4", "s18.mp4"]:  # already processed
-            continue
         args.input = mp4.replace(".mp4", "")  # hack
         print("input is:", args.input)
 

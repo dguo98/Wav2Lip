@@ -197,6 +197,10 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     if args.latent_type == "stylespace":
         np.save(f"{infer_dir}/predict_stylespace.npy", final_vecs)
         os.system(f"rm {infer_dir}/predict_*.pt")
+    elif args.latent_type == "w+":
+        np.save(f"{infer_dir}/frame.npy", final_vecs)
+        os.system(f"rm {infer_dir}/predict_*.pt")
+
     return 
 
 
@@ -232,6 +236,7 @@ if __name__ == "__main__":
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
     parser.add_argument("--model", type=str, default="transformer")
     parser.add_argument("--use_pose", type=int, default=0)
+    parser.add_argument("--use_lmk", type=int, default=0)
 
     # MLP parameters
     parser.add_argument("--nlayer", type=int, default=2)
@@ -303,6 +308,11 @@ if __name__ == "__main__":
     org_output_dim = output_dim
     if args.use_pose == 1:
         input_dim = input_dim + 6
+    elif args.use_pose == 2:
+        input_dim = input_dim + 8
+    elif args.use_pose == 3:
+        input_dim = input_dim + 6 + 2 + 24
+
 
     # load image-loss related models
     aux_models = {}

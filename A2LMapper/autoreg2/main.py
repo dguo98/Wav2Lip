@@ -236,7 +236,7 @@ def inference(args, data_loader, model, infer_dir, neutral_vec, mode="autoreg"):
     
     new_vecs_list = []
 
-    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks) in tqdm(enumerate(data_loader),total=total, desc="inference"):
+    for n_iter, (ids, src, prev_tgt, tgt, src_mask, tgt_mask, imgs, lmks, mels) in tqdm(enumerate(data_loader),total=total, desc="inference"):
         
         bsz = src.size(0)
         seq_len = src.size(1)
@@ -316,7 +316,8 @@ if __name__ == "__main__":
     parser.add_argument("--pca", type=str, default=None)
     parser.add_argument("--pca_dims", type=int, nargs="+", default=None)
     parser.add_argument("--model", type=str, default="transformer")
-    parser.add_argument("--use_pose", type=int, default=0)
+    parser.add_argument("--use_pose", type=int, default=0, help=" 0: no; 1: only pose; 2: pose+eye close")
+    parser.add_argument("--use_lmk", type=int, default=0)  # input upper landmarks
 
     # MLP parameters
     parser.add_argument("--nlayer", type=int, default=2)
@@ -389,8 +390,19 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
     org_output_dim = output_dim
+
     if args.use_pose == 1:
         input_dim = input_dim + 6
+    elif args.use_pose == 2:
+        input_dim = input_dim + 8
+    elif args.use_pose == 3:
+        input_dim = input_dim + 6 + 2 + 24
+
+    if args.use_lmk == 1:
+        args.lmk_indices = [0,1,5,6]
+        args.lmk_indices.extend(list(range(17,64)))
+
+        input_dim = input_dim + len(args.lmk_indices)*2
 
     # load image-loss related models
     aux_models = {}
@@ -627,7 +639,7 @@ if __name__ == "__main__":
     lines = f.readlines()
     for line in lines:
         json_obj = json.loads(line.rstrip())
-        if json_obj["type"] == "train":
+        if json_obj.get("type", "other")  == "train":
             losses.append(json_obj["loss"])
             latent_losses.append(json_obj["latent_loss"])
             perc_losses.append(json_obj["perc_loss"])

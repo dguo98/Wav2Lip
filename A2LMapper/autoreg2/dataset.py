@@ -15,7 +15,8 @@ class Audio2FrameDataset(object):
         self.seq_len = args.seq_len
         self.split_ratio = split_ratio
         self.sample = sample  # sample strategy: [dense, sparse]
-        self.use_pose = args.use_pose == 1
+        self.use_pose = args.use_pose 
+        self.use_lmk = args.use_lmk == 1
         self.latent_type = args.latent_type
         self.image_type = args.image_type
         self.image_size = args.image_size
@@ -23,6 +24,12 @@ class Audio2FrameDataset(object):
 
         self.input_dim=input_dim
         self.output_dim=output_dim
+
+        self.pose_dim = 6
+        if self.use_pose == 2:
+            self.pose_dim = 8
+        elif self.use_pose == 3:
+            self.pose_dim = 6 + 2 + 24
         
         # HACK(demi): enforce consecutvie frames are together
         if args.sync_loss > 0.0 and split in ["train", "val"]:
@@ -77,9 +84,12 @@ class Audio2FrameDataset(object):
             self.audio_vecs_list.append(np.load(f"{folder}/wav2lip.npy"))
             
             # load images
+            if args.lmk_loss > 0.0 or self.use_lmk:
+                # NB(demi): always use gt landmarks
+                if args.image_type == "gan":
+                    print("Warning: we always use groundtruth landmarks")
+                self.lmk_vecs_list.append(np.load(f"{folder}/gt_lmks_r{args.image_size}.npy"))
             if self.image_type != "none":
-                if args.lmk_loss > 0.0:
-                    self.lmk_vecs_list.append(np.load(f"{folder}/{args.image_type}_lmks_r{args.image_size}.npy"))
                 if args.sync_loss > 0.0:
                     self.mel_vecs_list.append(np.load(f"{folder}/wav2lip_mels.npy"))
 
@@ -89,10 +99,17 @@ class Audio2FrameDataset(object):
                 self.latent_vecs_list.append(np.load(f"{folder}/frame_stylespace.npy").reshape(-1,9088)) 
             else:
                 raise NotImplementedError
-            if self.use_pose:
-                self.pose_vecs_list.append(np.load(f"{folder}/openface.npy")[:, 2:8].astype(np.float32))
+            if self.use_pose > 0:
+                pose_vec = np.load(f"{folder}/openface.npy")[:, 2:8].astype(np.float32)
+                if self.use_pose == 2:
+                    eye_vec = np.load(f"{folder}/eyes.npy")[:, :2].astype(np.float32)
+                    pose_vec = np.concatenate([pose_vec, eye_vec], axis=1)
+                elif self.use_pose == 3:
+                    eye_vec = np.load(f"{folder}/eyes.npy")[:, :].astype(np.float32)
+                    pose_vec = np.concatenate([pose_vec, eye_vec], axis=1)
+                self.pose_vecs_list.append(pose_vec)
             else:
-                self.pose_vecs_list.append(np.zeros((len(self.audio_vecs_list[-1]), 6), dtype=np.float32))
+                self.pose_vecs_list.append(np.zeros((len(self.audio_vecs_list[-1]), self.pose_dim), dtype=np.float32))
         assert len(self.counts) <= 1000, "currently iterate over all folders -- cannot support many folders"
         
         self.data_len = np.sum(np.array(self.counts))
@@ -143,19 +160,19 @@ class Audio2FrameDataset(object):
             else:
                 image_vecs = None
                 
-            if self.args.lmk_loss > 0.0:
-                lmk_vecs = self.lmk_vecs_list[folder_id]
-            else:
-                lmk_vecs = None
-
             if self.args.sync_loss > 0.0:
                 mel_vecs = self.mel_vecs_list[folder_id]
             else:
                 mel_vecs = None
         else:
             image_vecs = None
-            lmk_vecs = None
             mel_vecs = None
+
+        if self.args.lmk_loss > 0.0 or self.use_lmk:
+            lmk_vecs = self.lmk_vecs_list[folder_id]
+        else:
+            lmk_vecs = None
+
 
 
             
@@ -178,9 +195,13 @@ class Audio2FrameDataset(object):
         if mel_vecs is not None:
             mels = mel_vecs[idx: r_idx]
 
-        if self.use_pose:
+        if self.use_pose > 0:
             src = np.concatenate([src, pose_vecs[idx:r_idx]], axis=1)
             assert src.shape == (r_idx-idx, len(audio_vecs[0])+len(pose_vecs[0]))
+        if self.use_lmk:
+            add_lmks = lmks[:, self.args.lmk_indices].reshape(r_idx-idx, len(self.args.lmk_indices)*2)
+            src = np.concatenate([src, add_lmks], axis=1)
+            assert src.shape == (r_idx-idx, self.input_dim)
 
         if idx == 0:
             prev_tgt = latent_vecs[0:r_idx-1]

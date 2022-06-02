@@ -250,7 +250,6 @@ def train(video_folder, device, model, train_data_loader, test_data_loader, opti
     resumed_step = global_step
     
     global_epoch = 0
-    indiv_mels_list = []
     while global_epoch < nepochs:
         print('Starting Epoch: {}'.format(global_epoch))
         running_sync_loss, running_l1_loss = 0., 0.
@@ -270,23 +269,15 @@ def train(video_folder, device, model, train_data_loader, test_data_loader, opti
             
             #print("in training loop: x, mel, indiv_mels, gt, gt_ids, idxs")
             audio, context, final_ids = model.extract(indiv_mels, x, gt_ids)
-            
-            assert indiv_mels.shape[0] == len(final_ids)
 
             for i in range(len(final_ids)):
                 idx = final_ids[i].item()
                 torch.save(audio[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_audio_{idx:06d}.pt")
                 torch.save(context[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_context_{idx:06d}.pt")
-                indiv_mels_list.append(indiv_mels[i].reshape(80,16).detach().cpu().numpy())
 
             # embed()
 
         global_epoch += 1          
-        indiv_mels_list = np.stack(indiv_mels_list, axis=0)
-        print("indiv_mels_list.shape=",indiv_mels_list.shape)
-
-        np.save(f"{video_folder}/wav2lip_mels.npy", indiv_mels_list)
-        break
 
        
 def _load(checkpoint_path):

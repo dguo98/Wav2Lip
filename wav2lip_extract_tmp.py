@@ -38,7 +38,7 @@ class Dataset(object):
     def __init__(self, split):
         self.all_videos = [split]
         self.wavpath = f"{split}/audio.wav"
-        self.frames = sorted(glob(f"{split}/wav2lip_faces/[0123456789]*.jpg"))
+        self.frames = sorted(glob(f"{split}/frames/frame_*[0123456789].jpg"))
 
         # HACK(demi): for debugging
         #self.frames = self.frames[:42]
@@ -55,7 +55,7 @@ class Dataset(object):
         print("numframes=", self.num_frames, " datalen=", self.data_len)
 
     def get_frame_id(self, frame):
-        return int(basename(frame).split('.')[0])
+        return int(basename(frame).split('.')[0].replace("frame_",""))
 
     def get_window(self, start_frame):
         start_id = self.get_frame_id(start_frame)
@@ -63,7 +63,7 @@ class Dataset(object):
 
         window_fnames = []
         for frame_id in range(start_id, start_id + syncnet_T):
-            frame = join(vidname, f'{frame_id:06d}.jpg')
+            frame = join(vidname, f'frame_{frame_id:06d}.jpg')
             if not isfile(frame):
                 return None
             window_fnames.append(frame)
@@ -269,17 +269,16 @@ def train(video_folder, device, model, train_data_loader, test_data_loader, opti
             gt = gt.to(device)
             
             #print("in training loop: x, mel, indiv_mels, gt, gt_ids, idxs")
-            audio, context, final_ids = model.extract(indiv_mels, x, gt_ids)
+            #audio, context, final_ids = model.extract(indiv_mels, x, gt_ids)
             
-            assert indiv_mels.shape[0] == len(final_ids)
+            indiv_mels = indiv_mels.reshape(-1, 80,16)
+            assert indiv_mels.shape[0] == len(gt_ids.reshape(-1))
 
-            for i in range(len(final_ids)):
-                idx = final_ids[i].item()
-                torch.save(audio[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_audio_{idx:06d}.pt")
-                torch.save(context[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_context_{idx:06d}.pt")
+            for i in range(len(indiv_mels)):
+                #torch.save(audio[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_audio_{idx:06d}.pt")
+                #torch.save(context[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_context_{idx:06d}.pt")
                 indiv_mels_list.append(indiv_mels[i].reshape(80,16).detach().cpu().numpy())
 
-            # embed()
 
         global_epoch += 1          
         indiv_mels_list = np.stack(indiv_mels_list, axis=0)
@@ -320,10 +319,8 @@ def load_checkpoint(path, model, optimizer, reset_optimizer=False, overwrite_glo
     return model
 
 if __name__ == "__main__":
-    if os.path.exists(f"{args.data_root}.mp4"):  # single video
-        video_folders = [args.data_root]
-    else:
-        video_folders = glob(f"{args.data_root}/*")
+    video_folders = [args.data_root]
+
     print("video_folders=",video_folders)
     # Model
     model = Wav2Lip().to(device)
@@ -338,7 +335,7 @@ if __name__ == "__main__":
     for video_folder in video_folders:
         if ".mp4" in video_folder:
             continue
-        os.makedirs(f"{video_folder}/wav2lip_latents")
+        #os.makedirs(f"{video_folder}/wav2lip_latents")
         train_dataset = Dataset(video_folder)
         """ 
         for i in tqdm(range(400), desc="go through dataset"):

@@ -5,8 +5,8 @@ from glob import glob
 
 if __name__ == "__main__":
     
-    prefix = "B001*"
-    output_dir = f"logs/0427_agg"
+    prefix = "A001*"
+    output_dir = f"logs/0519_agg"
     os.makedirs(output_dir, exist_ok=True)
 
     # aggregate loss curves
@@ -16,15 +16,15 @@ if __name__ == "__main__":
         os.system(f"cp {f} {output_dir}/{name}_loss_curve.png")
     
     # aggregate videos
-    files = glob(f"logs/{prefix}/inference/predict_with_audio.mp4")
+    files = glob(f"logs/{prefix}/train.mp4")
     for f in files:
         name = f.split("/")[1]
-        os.system(f"cp {f} {output_dir}/{name}_video.mp4")
-    files = glob(f"logs/{prefix}/tf_inference/predict_with_audio.mp4")
+        os.system(f"cp {f} {output_dir}/{name}_train_video.mp4")
+    files = glob(f"logs/{prefix}/test.mp4")
     for f in files:
         name = f.split("/")[1]
-        os.system(f"cp {f} {output_dir}/{name}_tfvideo.mp4")
-    
+        os.system(f"cp {f} {output_dir}/{name}_test_video.mp4")
+   
     # create csv
     files = glob(f"logs/{prefix}/metrics.json")
     csv = open(f"{output_dir}/result.csv", "w")
@@ -32,7 +32,12 @@ if __name__ == "__main__":
     for f in files:
         name = f.split("/")[-2]
         with open(f) as ff:
-            js = json.load(ff)
-            csv.write(f"{name}\t{js['best_val_loss']:.3f}\t{js['last_train_loss']:.3f}\t{js['last_val_loss']:.3f}\n")
+            lines=ff.readlines()
+            try:
+                js = json.loads(lines[-1].rstrip())
+                print(js)
+                csv.write(f"{name}\t{js['best_val_loss']:.3f}\t{js['last_train_loss']:.3f}\t{js['last_val_loss']:.3f}\n")
+            except:
+                pass
     csv.close()
             

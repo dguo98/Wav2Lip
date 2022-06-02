@@ -379,6 +379,11 @@ if __name__ == "__main__":
     org_output_dim = output_dim
     if args.use_pose == 1:
         input_dim = input_dim + 6
+    elif args.use_pose == 2:
+        input_dim = input_dim + 8
+    elif args.use_pose == 3:
+        input_dim = input_dim + 6 + 2 + 24
+
 
     # load image-loss related models
     aux_models = {}

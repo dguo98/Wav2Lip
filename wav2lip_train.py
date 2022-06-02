@@ -11,6 +11,7 @@ from torch import optim
 import torch.backends.cudnn as cudnn
 from torch.utils import data as data_utils
 import numpy as np
+from IPython import embed
 
 from glob import glob
 
@@ -196,13 +197,19 @@ for p in syncnet.parameters():
     p.requires_grad = False
 
 recon_loss = nn.L1Loss()
+from PIL import Image
 def get_sync_loss(mel, g):
+    # RGB values inversed, in [0, 1]
+    # g: [bsz, 3, T=5, 96, 96]
+    # mel: [bsz, 1, 80, 16]
+    
     g = g[:, :, :, g.size(3)//2:]
     g = torch.cat([g[:, :, i] for i in range(syncnet_T)], dim=1)
     # B, 3 * T, H//2, W
     a, v = syncnet(mel, g)
     y = torch.ones(g.size(0), 1).float().to(device)
-    return cosine_loss(a, v, y)
+    loss = cosine_loss(a, v, y)
+    return loss
 
 def train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
@@ -224,6 +231,13 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             mel = mel.to(device)
             indiv_mels = indiv_mels.to(device)
             gt = gt.to(device)
+            
+            """            
+            # HACK(demi): save image
+            gt_img = gt[0, :, 0, :, :].reshape(3,96,96).permute((1,2,0))[:, :, [2,1,0]]
+            gt_img = gt_img.detach().cpu().numpy()
+            Image.fromarray(np.uint8(gt_img*255)).save("gt_img.jpg")
+            """
 
             g = model(indiv_mels, x)
 
