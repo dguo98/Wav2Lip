@@ -56,12 +56,14 @@ if __name__ == "__main__":
             os.system(command)
         print("Finish extracting encodings from wav2lip")
             
+        """
         print("extract latents")
         cmd = f"cd ../talking-head-stylegan;python scripts/inference.py --images_dir ../Wav2Lip/{args.input}/frames --save_dir ../Wav2Lip/{args.input}/frame_latents e4e_ffhq_encode.pt --align"
         print(cmd)
         if not os.path.exists(f"{args.input}/frame_latents") and not os.path.exists(f"{args.input}/frame.npy"):
             os.system(cmd)
         print("finish extracting latents")
+        """
           
         # save in combined npy
         if not os.path.exists(f"{args.input}/wav2lip.npy"):
@@ -78,7 +80,7 @@ if __name__ == "__main__":
             if os.path.exists(f"{args.input}/wav2lip_faces"):
                 shutil.rmtree(f"{args.input}/wav2lip_faces")
 
-        
+        """ 
         if not os.path.exists(f"{args.input}/frame.npy"):
             latent_files = sorted(glob(f"{args.input}/frame_latents/latents_frame*.npy"))
             latent_vecs = []
@@ -88,11 +90,14 @@ if __name__ == "__main__":
             latent_vecs = np.stack(latent_vecs, axis=0)
             print("latent vecs shape=", latent_vecs.shape)
             np.save(f"{args.input}/frame.npy", latent_vecs)
+        """
            
+        """
         # assume frame 000000 is neutral
         if (t==0):
             os.system(f"cp {args.input}/frames/frame_000000.jpg {folder}/neutral.jpg")
             os.system(f"cp {args.input}/frame_latents/latents_frame_000000.npy {folder}/neutral.npy")
+        """
     
         if os.path.exists(f"{args.input}/frame.npy") and os.path.exists(f"{args.input}/frame_latent"):
             shutil.rmtree(f"{args.input}/frame_latents")

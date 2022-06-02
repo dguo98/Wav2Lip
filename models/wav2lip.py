@@ -4,6 +4,7 @@ from torch.nn import functional as F
 import math
 
 from .conv import Conv2dTranspose, Conv2d, nonorm_Conv2d
+from IPython import embed
 
 class Wav2Lip(nn.Module):
     def __init__(self):
@@ -83,6 +84,26 @@ class Wav2Lip(nn.Module):
         self.output_block = nn.Sequential(Conv2d(80, 32, kernel_size=3, stride=1, padding=1),
             nn.Conv2d(32, 3, kernel_size=1, stride=1, padding=0),
             nn.Sigmoid()) 
+
+    def extract(self, audio_sequences, face_sequences, idxs):
+        # audio_sequences = (B, T, 1, 80, 16)
+        B = audio_sequences.size(0)
+
+        #print("audio_sequences.shape=",audio_sequences.shape)
+        #print("idxs=", idxs.shape)
+        input_dim_size = len(face_sequences.size())
+        #embed()
+        if input_dim_size > 4:
+            audio_sequences = torch.cat([audio_sequences[:, i] for i in range(audio_sequences.size(1))], dim=0)
+            idxs = torch.cat([idxs[:, i] for i in range(idxs.size(1))],dim=0)
+
+        audio_embedding = self.audio_encoder(audio_sequences) # B, 512, 1, 1
+        #print("final audio_embedding.shape=", audio_embedding.shape)
+        #print("idx=",idxs)
+        #embed()
+        return audio_embedding, idxs
+        
+
 
     def forward(self, audio_sequences, face_sequences):
         # audio_sequences = (B, T, 1, 80, 16)

@@ -269,14 +269,14 @@ def train(video_folder, device, model, train_data_loader, test_data_loader, opti
             gt = gt.to(device)
             
             #print("in training loop: x, mel, indiv_mels, gt, gt_ids, idxs")
-            audio, context, final_ids = model.extract(indiv_mels, x, gt_ids)
-            
+            audio, final_ids = model.extract(indiv_mels, x, gt_ids)
+
+            indiv_mels= indiv_mels.reshape(-1, 80, 16)
             assert indiv_mels.shape[0] == len(final_ids)
 
             for i in range(len(final_ids)):
                 idx = final_ids[i].item()
                 torch.save(audio[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_audio_{idx:06d}.pt")
-                torch.save(context[i].reshape(-1), f"{video_folder}/wav2lip_latents/wav2lip_context_{idx:06d}.pt")
                 indiv_mels_list.append(indiv_mels[i].reshape(80,16).detach().cpu().numpy())
 
             # embed()
